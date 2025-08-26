@@ -11,6 +11,7 @@ __pycache__/
 *.so
 
 pre_trained_gnn/
+datasets/
 
 # Distribution / packaging
 .Python

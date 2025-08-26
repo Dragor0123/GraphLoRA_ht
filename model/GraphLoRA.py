@@ -136,7 +136,7 @@ def transfer(args, config, gpu_id, is_reduction):
         pos_weight = float(target_adj.shape[0] * target_adj.shape[0] - target_adj.sum()) / target_adj.sum()
         weight_mask = target_adj.view(-1) == 1
         weight_tensor = torch.ones(weight_mask.size(0)).to(device)
-        weight_tensor[weight_mask] = pos_weight / 10
+        weight_tensor[weight_mask] = pos_weight
 
         feature_map = projector(test_dataset.x)
         emb, emb1, emb2 = gnn2(feature_map, test_dataset.edge_index)
@@ -170,10 +170,20 @@ def transfer(args, config, gpu_id, is_reduction):
             print(f"softmax_logits has NaN: {torch.isnan(softmax_logits).any().item()}")
             print(f"softmax_logits has Inf: {torch.isinf(softmax_logits).any().item()}")
         
-        # Check matrix multiplication
-        matmul_result = torch.matmul(softmax_logits, softmax_logits.T)
+        # Check if dataset is heterophilic - modify adjacency reconstruction accordingly
+        is_heterophilic = args.test_dataset in ['Squirrel', 'Chameleon', 'Actor', 'Cornell', 'Texas', 'Wisconsin']
+        
+        if is_heterophilic:
+            # For heterophilic graphs: nodes with DIFFERENT predictions should be connected
+            # Use negative dot product or 1 - similarity
+            similarity_matrix = torch.matmul(softmax_logits, softmax_logits.T)
+            matmul_result = 1.0 - similarity_matrix  # Invert similarity for heterophilic case
+        else:
+            # For homophilic graphs: nodes with SIMILAR predictions should be connected
+            matmul_result = torch.matmul(softmax_logits, softmax_logits.T)
         
         if epoch >= 0 and epoch < 5:
+            print(f"Dataset type: {'Heterophilic' if is_heterophilic else 'Homophilic'}")
             print(f"matmul_result min/max: {matmul_result.min().item():.6f} / {matmul_result.max().item():.6f}")
             print(f"matmul_result has NaN: {torch.isnan(matmul_result).any().item()}")
             print(f"matmul_result has Inf: {torch.isinf(matmul_result).any().item()}")
@@ -185,15 +195,40 @@ def transfer(args, config, gpu_id, is_reduction):
             print(f"rec_adj has NaN: {torch.isnan(rec_adj).any().item()}")
             print(f"rec_adj has Inf: {torch.isinf(rec_adj).any().item()}")
         
+        # Check if rec_adj goes outside [0,1] range (which should be impossible after sigmoid)
+        rec_adj_flat = rec_adj.view(-1)
+        outside_range_mask = (rec_adj_flat < 0) | (rec_adj_flat > 1)
+        if outside_range_mask.any():
+            print(f"CRITICAL: rec_adj contains values outside [0,1] at epoch {epoch}!")
+            outside_values = rec_adj_flat[outside_range_mask]
+            print(f"Number of values outside [0,1]: {outside_range_mask.sum().item()}")
+            print(f"Outside values (first 10): {outside_values[:10].tolist()}")
+            print(f"Min outside value: {outside_values.min().item()}")
+            print(f"Max outside value: {outside_values.max().item()}")
+            
+            # Check the input to sigmoid as well
+            matmul_flat = matmul_result.view(-1)
+            extreme_inputs = matmul_flat[outside_range_mask]
+            print(f"Corresponding matmul_result values (first 10): {extreme_inputs[:10].tolist()}")
+            print(f"Min matmul input: {extreme_inputs.min().item()}")
+            print(f"Max matmul input: {extreme_inputs.max().item()}")
+        
+        # Also check for any values that are exactly 0 or 1 (edge cases for BCE)
+        exact_zero_mask = (rec_adj_flat == 0)
+        exact_one_mask = (rec_adj_flat == 1)
+        if exact_zero_mask.any() or exact_one_mask.any():
+            print(f"Warning at epoch {epoch}: rec_adj contains exact 0s: {exact_zero_mask.sum().item()}, exact 1s: {exact_one_mask.sum().item()}")
+        
         # Temporarily disable loss_rec calculation to test
-        # rec_adj = torch.clamp(rec_adj, min=1e-7, max=1-1e-7)  # Ensure values are in valid range for BCE
-        # target_adj_clamped = torch.clamp(target_adj, min=0.0, max=1.0)  # Ensure target is also in valid range
-        # loss_rec = F.binary_cross_entropy(rec_adj.view(-1), target_adj_clamped.view(-1), weight=weight_tensor)
-        loss_rec = torch.tensor(0.0).to(device)  # Dummy loss_rec
-
+        
+        target_adj_clamped = torch.clamp(target_adj, min=0.0, max=1.0)
+        loss_rec = F.binary_cross_entropy(rec_adj.view(-1), target_adj_clamped.view(-1), weight=weight_tensor)
+        
         preds = torch.argmax(train_logits, dim=1)
         cls_loss = loss_fn(train_logits, train_labels)
-        loss = args.l1 * cls_loss + args.l2 * smmd_loss_f +  args.l3 * ct_loss + 0.0 * loss_rec
+        # Use a small coefficient for reconstruction loss to avoid overwhelming the classification loss
+        loss_rec_coeff = 0.01 if is_heterophilic else 0.1
+        loss = args.l1 * cls_loss + args.l2 * smmd_loss_f +  args.l3 * ct_loss + loss_rec_coeff * loss_rec
         loss.backward()
         
         # Add gradient clipping to prevent gradient explosion
