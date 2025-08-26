@@ -143,7 +143,7 @@ def transfer(args, config, gpu_id, is_reduction):
         train_labels = test_dataset.y[train_mask]
         optimizer.zero_grad()
 
-        smmd_loss_f = batched_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, 128)      
+        smmd_loss_f = 0.0# batched_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, 128)      
         ct_loss = 0.5 * (batched_gct_loss(emb1, emb2, 1000, mask, args.tau) + batched_gct_loss(emb2, emb1, 1000, mask, args.tau)).mean()
         logits = logreg(emb)
         train_logits = logits[train_mask]
@@ -252,6 +252,7 @@ def transfer(args, config, gpu_id, is_reduction):
         # Use a small coefficient for reconstruction loss to avoid overwhelming the classification loss
         loss_rec_coeff = 0.01 if is_heterophilic else 0.1
         loss = args.l1 * cls_loss + args.l2 * smmd_loss_f +  args.l3 * ct_loss + loss_rec_coeff * loss_rec
+        # loss = args.l1 * cls_loss + args.l2 * 0.0 +  args.l3 * ct_loss + loss_rec_coeff * loss_rec
         
         # Check for NaN in loss before backward pass
         if torch.isnan(loss):
