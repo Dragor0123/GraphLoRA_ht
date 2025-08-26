@@ -93,3 +93,5 @@ Few: False, r: 32, Squirrel to Actor: val_acc: 0.248684, test_acc: 0.204276
 Few: False, r: 32, Squirrel to Chameleon: val_acc: 0.359649, test_acc: 0.318880
 Few: False, r: 32, PubMed to Chameleon: val_acc: 0.359649, test_acc: 0.306806
 Few: False, r: 32, PubMed to Squirrel: val_acc: 0.257692, test_acc: 0.224946
+Few: False, r: 32, PubMed to Chameleon: val_acc: 0.364035, test_acc: 0.308452
+Few: False, r: 32, Squirrel to Chameleon: val_acc: 0.359649, test_acc: 0.318880

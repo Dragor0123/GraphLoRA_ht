@@ -174,16 +174,35 @@ def transfer(args, config, gpu_id, is_reduction):
         is_heterophilic = args.test_dataset in ['Squirrel', 'Chameleon', 'Actor', 'Cornell', 'Texas', 'Wisconsin']
         
         if is_heterophilic:
-            # For heterophilic graphs: nodes with DIFFERENT predictions should be connected
-            # Use negative dot product or 1 - similarity
+            # For heterophilic graphs: use 2-hop homophilic assumption
+            # Step 1: Compute 2-hop adjacency matrix
+            A1 = to_dense_adj(test_dataset.edge_index)[0]  # 1-hop adjacency
+            A2 = torch.matmul(A1, A1)  # 2-hop adjacency matrix
+            I = torch.eye(test_dataset.x.shape[0], device=device)  # Identity matrix (self-loops)
+            A2_pure = A2 - A1  # Remove 1-hop connections, keep 2-hop + self-loops from A2
+            
+            # Binarize 2-hop connections (any path count > 0 becomes 1)
+            A2_binary = (A2_pure > 0).float()
+            
+            # Add self-loops explicitly
+            A2_with_self = A2_binary + I
+            A2_with_self = torch.clamp(A2_with_self, max=1.0)  # Ensure binary values
+            
+            # Step 2: Mixed reconstruction strategy
             similarity_matrix = torch.matmul(softmax_logits, softmax_logits.T)
-            matmul_result = 1.0 - similarity_matrix  # Invert similarity for heterophilic case
+            
+            # For 2-hop + self: use similarity (homophilic)
+            # For others: use dissimilarity (heterophilic) 
+            matmul_result = A2_with_self * similarity_matrix + (1.0 - A2_with_self) * (1.0 - similarity_matrix)
         else:
             # For homophilic graphs: nodes with SIMILAR predictions should be connected
             matmul_result = torch.matmul(softmax_logits, softmax_logits.T)
         
         if epoch >= 0 and epoch < 5:
             print(f"Dataset type: {'Heterophilic' if is_heterophilic else 'Homophilic'}")
+            if is_heterophilic:
+                print(f"2-hop adjacency stats: edges={A2_with_self.sum().item():.0f}, density={A2_with_self.mean().item():.4f}")
+                print(f"similarity_matrix min/max: {similarity_matrix.min().item():.6f} / {similarity_matrix.max().item():.6f}")
             print(f"matmul_result min/max: {matmul_result.min().item():.6f} / {matmul_result.max().item():.6f}")
             print(f"matmul_result has NaN: {torch.isnan(matmul_result).any().item()}")
             print(f"matmul_result has Inf: {torch.isinf(matmul_result).any().item()}")
@@ -222,19 +241,37 @@ def transfer(args, config, gpu_id, is_reduction):
         # Temporarily disable loss_rec calculation to test
         
         target_adj_clamped = torch.clamp(target_adj, min=0.0, max=1.0)
-        loss_rec = F.binary_cross_entropy(rec_adj.view(-1), target_adj_clamped.view(-1), weight=weight_tensor)
+        
+        # Add epsilon for numerical stability in BCE
+        epsilon = 1e-7
+        rec_adj_stable = torch.clamp(rec_adj, min=epsilon, max=1-epsilon)
+        loss_rec = F.binary_cross_entropy(rec_adj_stable.view(-1), target_adj_clamped.view(-1), weight=weight_tensor)
         
         preds = torch.argmax(train_logits, dim=1)
         cls_loss = loss_fn(train_logits, train_labels)
         # Use a small coefficient for reconstruction loss to avoid overwhelming the classification loss
         loss_rec_coeff = 0.01 if is_heterophilic else 0.1
         loss = args.l1 * cls_loss + args.l2 * smmd_loss_f +  args.l3 * ct_loss + loss_rec_coeff * loss_rec
+        
+        # Check for NaN in loss before backward pass
+        if torch.isnan(loss):
+            print(f"Warning: NaN detected in loss at epoch {epoch}")
+            print(f"cls_loss: {cls_loss}, smmd_loss_f: {smmd_loss_f}, ct_loss: {ct_loss}, loss_rec: {loss_rec}")
+            optimizer.zero_grad()
+            continue
+            
         loss.backward()
         
         # Add gradient clipping to prevent gradient explosion
-        torch.nn.utils.clip_grad_norm_(projector.parameters(), max_norm=1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(projector.parameters(), max_norm=1.0)
         torch.nn.utils.clip_grad_norm_(logreg.parameters(), max_norm=1.0)
         torch.nn.utils.clip_grad_norm_(gnn2.parameters(), max_norm=1.0)
+        
+        # Check gradient norm
+        if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+            print(f"Warning: Invalid gradient norm {grad_norm} at epoch {epoch}")
+            optimizer.zero_grad()
+            continue
         
         optimizer.step()
 
