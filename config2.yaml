@@ -59,6 +59,78 @@ public:
     l3: 0.2
     l4: 0.2
     num_epochs: 500
+  Cornell:
+    wd1: 1e-2
+    wd2: 1e-3
+    wd3: 1e-1
+    lr1: 1e-3
+    lr2: 1e-1
+    lr3: 1e-5
+    l1: 1
+    l2: 2
+    l3: 0.5
+    l4: 5
+    num_epochs: 200
+  Wisconsin:
+    wd1: 1e-2
+    wd2: 1e-3
+    wd3: 1e-1
+    lr1: 1e-3
+    lr2: 1e-1
+    lr3: 1e-5
+    l1: 1
+    l2: 2
+    l3: 0.5
+    l4: 5
+    num_epochs: 200
+  Texas:
+    wd1: 1e-2
+    wd2: 1e-3
+    wd3: 1e-1
+    lr1: 1e-3
+    lr2: 1e-1
+    lr3: 1e-5
+    l1: 1
+    l2: 2
+    l3: 0.5
+    l4: 5
+    num_epochs: 200
+  Chameleon:
+    wd1: 1e-2
+    wd2: 2e-3
+    wd3: 1e-1
+    lr1: 1e-2
+    lr2: 2e-2
+    lr3: 1e-5
+    l1: 1
+    l2: 2
+    l3: 0.5
+    l4: 5
+    num_epochs: 200
+  Squirrel:
+    wd1: 1e-2
+    wd2: 2e-3
+    wd3: 1e-1
+    lr1: 1e-2
+    lr2: 2e-2
+    lr3: 1e-5
+    l1: 1
+    l2: 2
+    l3: 0.5
+    l4: 5
+    num_epochs: 200
+  Actor:
+    wd1: 1e-2
+    wd2: 2e-3
+    wd3: 1e-1
+    lr1: 1e-2
+    lr2: 2e-2
+    lr3: 1e-5
+    l1: 1
+    l2: 2
+    l3: 0.5
+    l4: 5
+    num_epochs: 200
 10shot:
   PubMed:
     wd1: 1e-1
@@ -120,6 +192,78 @@ public:
     l3: 1
     l4: 0.2
     num_epochs: 500
+  Cornell:
+    wd1: 1e-2
+    wd2: 5e-3
+    wd3: 1e-1
+    lr1: 5e-3
+    lr2: 2e-2
+    lr3: 5e-4
+    l1: 0.3
+    l2: 1
+    l3: 0.5
+    l4: 2
+    num_epochs: 200
+  Wisconsin:
+    wd1: 1e-2
+    wd2: 5e-3
+    wd3: 1e-1
+    lr1: 5e-3
+    lr2: 2e-2
+    lr3: 5e-4
+    l1: 0.3
+    l2: 1
+    l3: 0.5
+    l4: 2
+    num_epochs: 200
+  Texas:
+    wd1: 1e-2
+    wd2: 5e-3
+    wd3: 1e-1
+    lr1: 5e-3
+    lr2: 2e-2
+    lr3: 5e-4
+    l1: 0.3
+    l2: 1
+    l3: 0.5
+    l4: 2
+    num_epochs: 200
+  Chameleon:
+    wd1: 5e-3
+    wd2: 1e-3
+    wd3: 1e-1
+    lr1: 5e-3
+    lr2: 2e-2
+    lr3: 1e-5
+    l1: 0.5
+    l2: 1
+    l3: 0.5
+    l4: 1.5
+    num_epochs: 200
+  Squirrel:
+    wd1: 5e-3
+    wd2: 1e-3
+    wd3: 1e-1
+    lr1: 5e-3
+    lr2: 2e-2
+    lr3: 1e-5
+    l1: 0.5
+    l2: 1
+    l3: 0.5
+    l4: 1.5
+    num_epochs: 200
+  Actor:
+    wd1: 1e-3
+    wd2: 1e-4
+    wd3: 1e-3
+    lr1: 1e-2
+    lr2: 5e-2
+    lr3: 1e-3
+    l1: 1
+    l2: 1.5
+    l3: 0.5
+    l4: 0.5
+    num_epochs: 200
 5shot:
   PubMed:
     wd1: 1e-1

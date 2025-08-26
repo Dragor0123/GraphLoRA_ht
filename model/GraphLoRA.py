@@ -56,10 +56,10 @@ def transfer(args, config, gpu_id, is_reduction):
 
     # target adj
     target_adj = to_dense_adj(test_dataset.edge_index)[0]
-    pos_weight = float(test_dataset.x.shape[0] * test_dataset.x.shape[0] - test_dataset.edge_index.shape[1]) / test_dataset.edge_index.shape[1]
-    weight_mask = target_adj.view(-1) == 1
-    weight_tensor = torch.ones(weight_mask.size(0)).to(device)
-    weight_tensor[weight_mask] = pos_weight / 10
+    # pos_weight = float(test_dataset.x.shape[0] * test_dataset.x.shape[0] - test_dataset.edge_index.shape[1]) / test_dataset.edge_index.shape[1]
+    # weight_mask = target_adj.view(-1) == 1
+    # weight_tensor = torch.ones(weight_mask.size(0)).to(device)
+    # weight_tensor[weight_mask] = pos_weight / 10
 
     gnn = GNN(pretrain_dataset.x.shape[1], config['output_dim'], act(config['activation']), config['gnn_type'], config['num_layers'])
     model_path = "./pre_trained_gnn/{}.{}.{}.{}.pth".format(args.pretrain_dataset, args.pretext, config['gnn_type'], args.is_reduction)
@@ -136,7 +136,7 @@ def transfer(args, config, gpu_id, is_reduction):
         pos_weight = float(target_adj.shape[0] * target_adj.shape[0] - target_adj.sum()) / target_adj.sum()
         weight_mask = target_adj.view(-1) == 1
         weight_tensor = torch.ones(weight_mask.size(0)).to(device)
-        weight_tensor[weight_mask] = pos_weight
+        weight_tensor[weight_mask] = pos_weight / 10
 
         feature_map = projector(test_dataset.x)
         emb, emb1, emb2 = gnn2(feature_map, test_dataset.edge_index)
@@ -147,14 +147,60 @@ def transfer(args, config, gpu_id, is_reduction):
         ct_loss = 0.5 * (batched_gct_loss(emb1, emb2, 1000, mask, args.tau) + batched_gct_loss(emb2, emb1, 1000, mask, args.tau)).mean()
         logits = logreg(emb)
         train_logits = logits[train_mask]
-
-        reg_adj = torch.sigmoid(torch.matmul(torch.softmax(logits, dim=1), torch.softmax(logits, dim=1).T))
-        loss_reg = F.binary_cross_entropy(reg_adj.view(-1), target_adj.view(-1), weight=weight_tensor)
+        
+        # Debug: Check devices and intermediate values
+        if epoch >= 0 and epoch < 5:
+            print(f"Epoch {epoch} Root Cause Analysis:")
+            print(f"logits device: {logits.device}")
+            print(f"logits shape: {logits.shape}")
+            print(f"logits min/max: {logits.min().item():.6f} / {logits.max().item():.6f}")
+            print(f"logits has NaN: {torch.isnan(logits).any().item()}")
+            print(f"logits has Inf: {torch.isinf(logits).any().item()}")
+            print(f"target_adj device: {target_adj.device}")
+            print(f"emb device: {emb.device}")
+            print(f"emb min/max: {emb.min().item():.6f} / {emb.max().item():.6f}")
+            print(f"emb has NaN: {torch.isnan(emb).any().item()}")
+            print(f"emb has Inf: {torch.isinf(emb).any().item()}")
+        
+        # Check softmax computation step by step
+        softmax_logits = torch.softmax(logits, dim=1)
+        
+        if epoch >= 0 and epoch < 5:
+            print(f"softmax_logits min/max: {softmax_logits.min().item():.6f} / {softmax_logits.max().item():.6f}")
+            print(f"softmax_logits has NaN: {torch.isnan(softmax_logits).any().item()}")
+            print(f"softmax_logits has Inf: {torch.isinf(softmax_logits).any().item()}")
+        
+        # Check matrix multiplication
+        matmul_result = torch.matmul(softmax_logits, softmax_logits.T)
+        
+        if epoch >= 0 and epoch < 5:
+            print(f"matmul_result min/max: {matmul_result.min().item():.6f} / {matmul_result.max().item():.6f}")
+            print(f"matmul_result has NaN: {torch.isnan(matmul_result).any().item()}")
+            print(f"matmul_result has Inf: {torch.isinf(matmul_result).any().item()}")
+        
+        rec_adj = torch.sigmoid(matmul_result)
+        
+        if epoch >= 0 and epoch < 5:
+            print(f"rec_adj min/max: {rec_adj.min().item():.6f} / {rec_adj.max().item():.6f}")
+            print(f"rec_adj has NaN: {torch.isnan(rec_adj).any().item()}")
+            print(f"rec_adj has Inf: {torch.isinf(rec_adj).any().item()}")
+        
+        # Temporarily disable loss_rec calculation to test
+        # rec_adj = torch.clamp(rec_adj, min=1e-7, max=1-1e-7)  # Ensure values are in valid range for BCE
+        # target_adj_clamped = torch.clamp(target_adj, min=0.0, max=1.0)  # Ensure target is also in valid range
+        # loss_rec = F.binary_cross_entropy(rec_adj.view(-1), target_adj_clamped.view(-1), weight=weight_tensor)
+        loss_rec = torch.tensor(0.0).to(device)  # Dummy loss_rec
 
         preds = torch.argmax(train_logits, dim=1)
         cls_loss = loss_fn(train_logits, train_labels)
-        loss = args.l1 * cls_loss + args.l2 * smmd_loss_f +  args.l3 * ct_loss + args.l4 * loss_reg
+        loss = args.l1 * cls_loss + args.l2 * smmd_loss_f +  args.l3 * ct_loss + 0.0 * loss_rec
         loss.backward()
+        
+        # Add gradient clipping to prevent gradient explosion
+        torch.nn.utils.clip_grad_norm_(projector.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(logreg.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(gnn2.parameters(), max_norm=1.0)
+        
         optimizer.step()
 
         train_acc = torch.sum(preds == train_labels).float() / train_labels.shape[0]

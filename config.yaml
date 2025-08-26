@@ -95,6 +95,114 @@ Photo:
   epoch1: 100
   epoch2: 10000
   decay_epoch: 1000
+Cornell:
+  learning_rate: 0.0001
+  output_dim: 256
+  num_proj_dim: 256
+  activation: 'relu'
+  gnn_type: 'GAT'
+  num_layers: 2
+  drop_edge_rate: 0.4
+  drop_feature_rate: 0.1
+  tau: 0.5
+  num_epochs: 1000
+  weight_decay: 0
+  lr2: 0.01
+  wd2: 0.00001
+  epoch: 0
+  epoch1: 100
+  epoch2: 10000
+  decay_epoch: 1000
+Wisconsin:
+  learning_rate: 0.0001
+  output_dim: 256
+  num_proj_dim: 256
+  activation: 'relu'
+  gnn_type: 'GAT'
+  num_layers: 2
+  drop_edge_rate: 0.4
+  drop_feature_rate: 0.1
+  tau: 0.5
+  num_epochs: 1000
+  weight_decay: 0
+  lr2: 0.01
+  wd2: 0.00001
+  epoch: 0
+  epoch1: 100
+  epoch2: 10000
+  decay_epoch: 1000
+Texas:
+  learning_rate: 0.0001
+  output_dim: 256
+  num_proj_dim: 256
+  activation: 'relu'
+  gnn_type: 'GAT'
+  num_layers: 2
+  drop_edge_rate: 0.4
+  drop_feature_rate: 0.1
+  tau: 0.5
+  num_epochs: 1000
+  weight_decay: 0
+  lr2: 0.01
+  wd2: 0.00001
+  epoch: 0
+  epoch1: 100
+  epoch2: 10000
+  decay_epoch: 1000
+Chameleon:
+  learning_rate: 0.0001
+  output_dim: 256
+  num_proj_dim: 256
+  activation: 'relu'
+  gnn_type: 'GAT'
+  num_layers: 2
+  drop_edge_rate: 0.4
+  drop_feature_rate: 0.1
+  tau: 0.5
+  num_epochs: 1000
+  weight_decay: 0
+  lr2: 0.01
+  wd2: 0.00001
+  epoch: 0
+  epoch1: 100
+  epoch2: 10000
+  decay_epoch: 1000
+Squirrel:
+  learning_rate: 0.0001
+  output_dim: 256
+  num_proj_dim: 256
+  activation: 'relu'
+  gnn_type: 'GAT'
+  num_layers: 2
+  drop_edge_rate: 0.4
+  drop_feature_rate: 0.1
+  tau: 0.5
+  num_epochs: 1000
+  weight_decay: 0
+  lr2: 0.01
+  wd2: 0.00001
+  epoch: 0
+  epoch1: 100
+  epoch2: 10000
+  decay_epoch: 1000
+Actor:
+  learning_rate: 0.0001
+  output_dim: 256
+  num_proj_dim: 256
+  activation: 'relu'
+  gnn_type: 'GAT'
+  num_layers: 2
+  drop_edge_rate: 0.4
+  drop_feature_rate: 0.1
+  tau: 0.5
+  num_epochs: 1000
+  weight_decay: 0
+  lr2: 0.01
+  wd2: 0.00001
+  epoch: 0
+  epoch1: 100
+  epoch2: 10000
+  decay_epoch: 1000
 transfer:
   hidden_dim: 64
   output_dim: 256

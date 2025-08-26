@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 import torch_geometric.transforms as T
-from torch_geometric.datasets import Planetoid, Amazon
+from torch_geometric.datasets import Planetoid, Amazon, WebKB, WikipediaNetwork, Actor
 from torch_geometric.utils import to_dense_adj
 import numpy as np
 import yaml
@@ -31,11 +31,19 @@ def act(act_type='leakyrelu'):
 
 
 def get_dataset(path, name):
-    assert name in ['Cora', 'CiteSeer', 'PubMed', 'Computers', 'Photo']
-    if (name == 'Computers') | (name == 'Photo'):
+    assert name in ['Cora', 'CiteSeer', 'PubMed', 'Computers', 'Photo', 
+                    'Cornell', 'Wisconsin', 'Texas', 'Chameleon', 'Squirrel', 'Actor']
+    
+    if name in ['Computers', 'Photo']:
         return Amazon(path, name, T.NormalizeFeatures())
-    else:
+    elif name in ['Cora', 'CiteSeer', 'PubMed']:
         return Planetoid(path, name, transform=T.NormalizeFeatures())
+    elif name in ['Cornell', 'Wisconsin', 'Texas']:
+        return WebKB(path, name, transform=T.NormalizeFeatures())
+    elif name in ['Chameleon', 'Squirrel']:
+        return WikipediaNetwork(path, name, transform=T.NormalizeFeatures())
+    elif name == 'Actor':
+        return Actor(path, transform=T.NormalizeFeatures())
 
 
 def initialize_weights(m):
@@ -172,7 +180,7 @@ def get_few_shot_mask(data, shot, dataname, device):
     class_num = max(data.y) + 1
     y = data.y.cpu()
     selected = []
-    if dataname in ['PubMed', 'CiteSeer', 'Cora']:
+    if dataname in ['PubMed', 'CiteSeer', 'Cora', 'Cornell', 'Wisconsin', 'Texas']:
         train_mask = data.train_mask
         val_mask = data.val_mask
         test_mask = data.test_mask
