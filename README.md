@@ -25,5 +25,13 @@ You can easily run our code by
 python main.py --is_pretrain True
 
 # Fine-tuning
-python main.py --is_transfer True
+
+# 콘솔 출력 (기본)
+python main.py --pretrain_dataset PubMed --test_dataset CiteSeer --is_transfer True --seed 42
+
+# 로그 파일로 저장
+python main.py --pretrain_dataset PubMed --test_dataset CiteSeer --is_transfer True --seed 42 --use_logging True
+
+# 커스텀 로그 디렉토리 사용
+python main.py --pretrain_dataset PubMed --test_dataset CiteSeer --is_transfer True --seed 42 --use_logging True --log_dir ./experiments/logs
 ```

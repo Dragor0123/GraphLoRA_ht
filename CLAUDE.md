@@ -1,16 +1,53 @@
-## 1. First, add code to set a random seed so that the graph transfer learning called GraphLoRA can be reproduced every time the program is run.
+작업내용 : model/GraphLoRA.py의 코드에서 다음 두 loss term에 대한 논리 흐름을 정리한 후, 공통된 부분은 앞에 두고, 분기된 이후부터의 계산 경로를 각각 모듈화 해라.
+각 loss에 대해 함수 호출로 바로 가져오도록 하여 개발자가 해당 loss term을 on/off 하기 편하게 만들어라.
 
-## 2. config2.yaml 등의 파일에서 현재 데이터셋은 Cora, CiteSeer, PubMed, Computers, Photo밖에 지원하지 않는다.
-다음 6종류의 heterophilic dataset도 지원할 수 있도록 프로그램 코드와 config.yaml, config2.yaml을 수정해라.
+## 완료된 작업 (2025-08-27)
+1. **SMMD loss 모듈화**: `calculate_smmd_loss()` 함수로 분리
+   - feature_map을 입력받아 SMMD loss 계산
+   - `args.l2 > 0` 조건으로 on/off 제어 가능
 
-WebKb dataset(Cornell, Wisconsin, Texas) : https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.datasets.WebKB.html
+2. **Regularization loss 모듈화**: `calculate_reg_loss()` 함수로 분리  
+   - logits와 target_adj를 입력받아 regularization loss 계산
+   - `args.l4 > 0` 조건으로 on/off 제어 가능
 
-WikipeidaNetwork(Chameleon, Squirrel) : https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.datasets.WikipediaNetwork.html
+3. **중복 코드 제거**
+   - training loop 밖에 있던 불필요한 weight_tensor 초기화 코드 제거
+   - 실제로는 calculate_reg_loss 함수 내에서 매번 계산됨
 
-Actor : https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.datasets.Actor.html
+1. SMMD loss term의 코드 라인
+test_dataset = get_dataset(test_datapath, args.test_dataset)[0]
+if is_reduction:
+    feature_reduce = SVDFeatureReduction(out_channels=100)
+    pretrain_dataset = feature_reduce(pretrain_dataset)
+    test_dataset = feature_reduce(test_dataset)
+pretrain_dataset.edge_index = add_remaining_self_loops(pretrain_dataset.edge_index)[0]
+test_dataset.edge_index = add_remaining_self_loops(test_dataset.edge_index)[0]
+pretrain_dataset = pretrain_dataset.to(device)
+test_dataset = test_dataset.to(device)
 
-----
-참고용: 
+ppr_weight = get_ppr_weight(test_dataset)
+
+pretrain_graph_loader = DataLoader(pretrain_dataset.x, batch_size=128, shuffle=True)
+
+feature_map = projector(test_dataset.x)
+
+smmd_loss_f = batched_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, 128)
+loss = args.l1 * cls_loss + args.l2 * smmd_loss_f +  args.l3 * ct_loss + args.l4 * loss_reg
+
+2. loss_reg
+# feature_map 계산전까지는 SMMD loss term 계산 경로와 동일
+feature_map = projector(test_dataset.x)
+emb, emb1, emb2 = gnn2(feature_map, test_dataset.edge_index)
+logits = logreg(emb)
+
+reg_adj = torch.sigmoid(torch.matmul(torch.softmax(logits, dim=1), torch.softmax(logits, dim=1).T))
+loss_reg = F.binary_cross_entropy(reg_adj.view(-1), target_adj.view(-1), weight=weight_tensor)
+
+loss = args.l1 * cls_loss + args.l2 * smmd_loss_f +  args.l3 * ct_loss + args.l4 * loss_reg
+
+
+
+<!-- 참고용: 
 
 | Dataset | Nodes | Edges | Classes | Features |
 |:---|---:|---:|---:|---:|
@@ -25,4 +62,4 @@ Actor : https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geome
 | Wisconsin | 251 | 499 | 5 | 1,703 | 
 | Chameleon | 2,277 | 36,051 | 5 | 2,325 |
 | Squirrel | 5,201 | 216,933 | 5 | 2,089 | 
-| Actor | 7,600 | 29,926 | 5 | 932 |
+| Actor | 7,600 | 29,926 | 5 | 932 | -->

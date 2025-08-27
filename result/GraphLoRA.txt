@@ -118,3 +118,18 @@ Few: False, r: 32, Squirrel to Chameleon: val_acc: 0.355263, test_acc: 0.309001
 Few: False, r: 32, Squirrel to Chameleon: val_acc: 0.364035, test_acc: 0.315587
 Few: False, r: 32, Squirrel to Chameleon: val_acc: 0.359649, test_acc: 0.318880
 Few: False, r: 32, Squirrel to Chameleon: val_acc: 0.359649, test_acc: 0.331504
+Few: False, r: 32, Chameleon to CiteSeer: val_acc: 0.746000, test_acc: 0.715000
+Few: False, r: 32, PubMed to CiteSeer: val_acc: 0.738000, test_acc: 0.718000
+Few: False, r: 32, PubMed to CiteSeer: val_acc: 0.738000, test_acc: 0.712000
+Few: False, r: 32, Cora to CiteSeer: val_acc: 0.746000, test_acc: 0.709000
+Few: False, r: 32, PubMed to Squirrel: val_acc: 0.257692, test_acc: 0.237924
+Few: False, r: 32, PubMed to CiteSeer: val_acc: 0.738000, test_acc: 0.718000
+Few: False, r: 32, PubMed to Squirrel: val_acc: 0.194231, test_acc: 0.193944
+Few: False, r: 32, PubMed to Squirrel: val_acc: 0.209615, test_acc: 0.197308
+Few: False, r: 32, PubMed to Squirrel: val_acc: 0.194231, test_acc: 0.193944
+Few: False, r: 32, PubMed to Squirrel: val_acc: 0.257692, test_acc: 0.237924
+Few: False, r: 32, PubMed to Squirrel: val_acc: 0.238462, test_acc: 0.219899
+Few: False, r: 32, PubMed to Actor: val_acc: 0.240789, test_acc: 0.203125
+Few: False, r: 32, PubMed to Actor: val_acc: 0.313158, test_acc: 0.283059
+Few: False, r: 32, PubMed to Squirrel: val_acc: 0.255769, test_acc: 0.229031
+Few: False, r: 32, PubMed to CiteSeer: BEST val_acc: 0.738000, test_acc: 0.718000 | FINAL val_acc: 0.732000, test_acc: 0.721000

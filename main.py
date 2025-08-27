@@ -4,6 +4,8 @@ import argparse
 import torch
 import random
 import numpy as np
+import os
+from datetime import datetime
 from pre_train import pretrain
 from model.GraphLoRA import transfer
 from util import get_parameter
@@ -36,10 +38,21 @@ if __name__ == '__main__':
     parser.add_argument('--sup_weight', type=float, default=0.2)
     parser.add_argument('--r', type=int, default=32)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--use_logging', type=bool, default=False, help='Save results to log file instead of printing')
+    parser.add_argument('--log_dir', type=str, default='./logs', help='Directory to save log files')
     args = parser.parse_args()
     args = get_parameter(args)
 
     set_seed(args.seed)
+    
+    # Setup logging
+    log_file = None
+    if args.use_logging:
+        os.makedirs(args.log_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"{args.pretrain_dataset}_{args.test_dataset}_{timestamp}_seed{args.seed}.log"
+        log_file = os.path.join(args.log_dir, log_filename)
+        args.log_file = log_file
     
     assert args.gpu_id in range(0, 2)
     torch.cuda.set_device(args.gpu_id)

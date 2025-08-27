@@ -37,6 +37,54 @@ class LogReg(nn.Module):
         torch.nn.init.xavier_uniform_(self.fc.weight)
 
 
+def calculate_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, batch_size=128):
+    """
+    Calculate SMMD loss term
+    
+    Args:
+        feature_map: Projected features from test dataset
+        pretrain_graph_loader: DataLoader for pretrain dataset features
+        SMMD: SMMD loss function
+        ppr_weight: PPR weight matrix
+        batch_size: Batch size for SMMD loss calculation
+    
+    Returns:
+        smmd_loss: Computed SMMD loss value
+    """
+    return batched_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, batch_size)
+
+
+def calculate_reg_loss(logits, target_adj, device):
+    """
+    Calculate regularization loss term
+    
+    Args:
+        logits: Output logits from the model
+        target_adj: Target adjacency matrix
+        device: Device to run computations on
+    
+    Returns:
+        loss_reg: Computed regularization loss
+    """
+    pos_weight = float(target_adj.shape[0] * target_adj.shape[0] - target_adj.sum()) / target_adj.sum()
+    weight_mask = target_adj.view(-1) == 1
+    weight_tensor = torch.ones(weight_mask.size(0)).to(device)
+    weight_tensor[weight_mask] = pos_weight
+    
+    reg_adj = torch.sigmoid(torch.matmul(torch.softmax(logits, dim=1), torch.softmax(logits, dim=1).T))
+    loss_reg = F.binary_cross_entropy(reg_adj.view(-1), target_adj.view(-1), weight=weight_tensor)
+    
+    return loss_reg
+
+
+def log_output(message, args):
+    """Helper function to handle output based on logging preference"""
+    if hasattr(args, 'use_logging') and args.use_logging and hasattr(args, 'log_file'):
+        with open(args.log_file, 'a') as f:
+            f.write(message + '\n')
+    else:
+        print(message)
+
 def transfer(args, config, gpu_id, is_reduction):
     device = torch.device('cuda:{}'.format(gpu_id) if torch.cuda.is_available() else 'cpu')
 
@@ -56,10 +104,6 @@ def transfer(args, config, gpu_id, is_reduction):
 
     # target adj
     target_adj = to_dense_adj(test_dataset.edge_index)[0]
-    # pos_weight = float(test_dataset.x.shape[0] * test_dataset.x.shape[0] - test_dataset.edge_index.shape[1]) / test_dataset.edge_index.shape[1]
-    # weight_mask = target_adj.view(-1) == 1
-    # weight_tensor = torch.ones(weight_mask.size(0)).to(device)
-    # weight_tensor[weight_mask] = pos_weight / 10
 
     gnn = GNN(pretrain_dataset.x.shape[1], config['output_dim'], act(config['activation']), config['gnn_type'], config['num_layers'])
     model_path = "./pre_trained_gnn/{}.{}.{}.{}.pth".format(args.pretrain_dataset, args.pretext, config['gnn_type'], args.is_reduction)
@@ -128,152 +172,44 @@ def transfer(args, config, gpu_id, is_reduction):
     max_acc = 0
     max_test_acc = 0
     max_epoch = 0
+    
+    # Log experiment details
+    log_output('='*80, args)
+    log_output(f'Transfer Learning: {args.pretrain_dataset} -> {args.test_dataset}', args)
+    log_output(f'Seed: {args.seed}, LoRA rank: {args.r}', args)
+    log_output(f'Few-shot: {args.few}, Shot: {args.shot if args.few else "N/A"}', args)
+    log_output(f'Hyperparameters: l1={args.l1}, l2={args.l2}, l3={args.l3}, l4={args.l4}', args)
+    log_output('='*80, args)
 
     for epoch in range(0, args.num_epochs):
         logreg.train()
         projector.train()
-  
-        pos_weight = float(target_adj.shape[0] * target_adj.shape[0] - target_adj.sum()) / target_adj.sum()
-        weight_mask = target_adj.view(-1) == 1
-        weight_tensor = torch.ones(weight_mask.size(0)).to(device)
-        weight_tensor[weight_mask] = pos_weight
 
         feature_map = projector(test_dataset.x)
         emb, emb1, emb2 = gnn2(feature_map, test_dataset.edge_index)
         train_labels = test_dataset.y[train_mask]
         optimizer.zero_grad()
 
-        smmd_loss_f = 0.0# batched_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, 128)      
+        # Calculate SMMD loss if enabled (args.l2 > 0)
+        smmd_loss_f = 0
+        if args.l2 > 0:
+            smmd_loss_f = calculate_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, 128)
+        
+        # Calculate contrastive loss
         ct_loss = 0.5 * (batched_gct_loss(emb1, emb2, 1000, mask, args.tau) + batched_gct_loss(emb2, emb1, 1000, mask, args.tau)).mean()
+        
         logits = logreg(emb)
         train_logits = logits[train_mask]
-        
-        # Debug: Check devices and intermediate values
-        if epoch >= 0 and epoch < 5:
-            print(f"Epoch {epoch} Root Cause Analysis:")
-            print(f"logits device: {logits.device}")
-            print(f"logits shape: {logits.shape}")
-            print(f"logits min/max: {logits.min().item():.6f} / {logits.max().item():.6f}")
-            print(f"logits has NaN: {torch.isnan(logits).any().item()}")
-            print(f"logits has Inf: {torch.isinf(logits).any().item()}")
-            print(f"target_adj device: {target_adj.device}")
-            print(f"emb device: {emb.device}")
-            print(f"emb min/max: {emb.min().item():.6f} / {emb.max().item():.6f}")
-            print(f"emb has NaN: {torch.isnan(emb).any().item()}")
-            print(f"emb has Inf: {torch.isinf(emb).any().item()}")
-        
-        # Check softmax computation step by step
-        softmax_logits = torch.softmax(logits, dim=1)
-        
-        if epoch >= 0 and epoch < 5:
-            print(f"softmax_logits min/max: {softmax_logits.min().item():.6f} / {softmax_logits.max().item():.6f}")
-            print(f"softmax_logits has NaN: {torch.isnan(softmax_logits).any().item()}")
-            print(f"softmax_logits has Inf: {torch.isinf(softmax_logits).any().item()}")
-        
-        # Check if dataset is heterophilic - modify adjacency reconstruction accordingly
-        is_heterophilic = args.test_dataset in ['Squirrel', 'Chameleon', 'Actor', 'Cornell', 'Texas', 'Wisconsin']
-        
-        if is_heterophilic:
-            # For heterophilic graphs: use 2-hop homophilic assumption
-            # Step 1: Compute 2-hop adjacency matrix
-            A1 = to_dense_adj(test_dataset.edge_index)[0]  # 1-hop adjacency
-            A2 = torch.matmul(A1, A1)  # 2-hop adjacency matrix
-            I = torch.eye(test_dataset.x.shape[0], device=device)  # Identity matrix (self-loops)
-            A2_pure = A2 - A1  # Remove 1-hop connections, keep 2-hop + self-loops from A2
-            
-            # Binarize 2-hop connections (any path count > 0 becomes 1)
-            A2_binary = (A2_pure > 0).float()
-            
-            # Add self-loops explicitly
-            A2_with_self = A2_binary + I
-            A2_with_self = torch.clamp(A2_with_self, max=1.0)  # Ensure binary values
-            
-            # Step 2: Mixed reconstruction strategy
-            similarity_matrix = torch.matmul(softmax_logits, softmax_logits.T)
-            
-            # For 2-hop + self: use similarity (homophilic)
-            # For others: use dissimilarity (heterophilic) 
-            matmul_result = A2_with_self * similarity_matrix + (1.0 - A2_with_self) * (1.0 - similarity_matrix)
-        else:
-            # For homophilic graphs: nodes with SIMILAR predictions should be connected
-            matmul_result = torch.matmul(softmax_logits, softmax_logits.T)
-        
-        if epoch >= 0 and epoch < 5:
-            print(f"Dataset type: {'Heterophilic' if is_heterophilic else 'Homophilic'}")
-            if is_heterophilic:
-                print(f"2-hop adjacency stats: edges={A2_with_self.sum().item():.0f}, density={A2_with_self.mean().item():.4f}")
-                print(f"similarity_matrix min/max: {similarity_matrix.min().item():.6f} / {similarity_matrix.max().item():.6f}")
-            print(f"matmul_result min/max: {matmul_result.min().item():.6f} / {matmul_result.max().item():.6f}")
-            print(f"matmul_result has NaN: {torch.isnan(matmul_result).any().item()}")
-            print(f"matmul_result has Inf: {torch.isinf(matmul_result).any().item()}")
-        
-        rec_adj = torch.sigmoid(matmul_result)
-        
-        if epoch >= 0 and epoch < 5:
-            print(f"rec_adj min/max: {rec_adj.min().item():.6f} / {rec_adj.max().item():.6f}")
-            print(f"rec_adj has NaN: {torch.isnan(rec_adj).any().item()}")
-            print(f"rec_adj has Inf: {torch.isinf(rec_adj).any().item()}")
-        
-        # Check if rec_adj goes outside [0,1] range (which should be impossible after sigmoid)
-        rec_adj_flat = rec_adj.view(-1)
-        outside_range_mask = (rec_adj_flat < 0) | (rec_adj_flat > 1)
-        if outside_range_mask.any():
-            print(f"CRITICAL: rec_adj contains values outside [0,1] at epoch {epoch}!")
-            outside_values = rec_adj_flat[outside_range_mask]
-            print(f"Number of values outside [0,1]: {outside_range_mask.sum().item()}")
-            print(f"Outside values (first 10): {outside_values[:10].tolist()}")
-            print(f"Min outside value: {outside_values.min().item()}")
-            print(f"Max outside value: {outside_values.max().item()}")
-            
-            # Check the input to sigmoid as well
-            matmul_flat = matmul_result.view(-1)
-            extreme_inputs = matmul_flat[outside_range_mask]
-            print(f"Corresponding matmul_result values (first 10): {extreme_inputs[:10].tolist()}")
-            print(f"Min matmul input: {extreme_inputs.min().item()}")
-            print(f"Max matmul input: {extreme_inputs.max().item()}")
-        
-        # Also check for any values that are exactly 0 or 1 (edge cases for BCE)
-        exact_zero_mask = (rec_adj_flat == 0)
-        exact_one_mask = (rec_adj_flat == 1)
-        if exact_zero_mask.any() or exact_one_mask.any():
-            print(f"Warning at epoch {epoch}: rec_adj contains exact 0s: {exact_zero_mask.sum().item()}, exact 1s: {exact_one_mask.sum().item()}")
-        
-        # Temporarily disable loss_rec calculation to test
-        
-        target_adj_clamped = torch.clamp(target_adj, min=0.0, max=1.0)
-        
-        # Add epsilon for numerical stability in BCE
-        epsilon = 1e-7
-        rec_adj_stable = torch.clamp(rec_adj, min=epsilon, max=1-epsilon)
-        loss_rec = F.binary_cross_entropy(rec_adj_stable.view(-1), target_adj_clamped.view(-1), weight=weight_tensor)
-        
+
+        # Calculate regularization loss if enabled (args.l4 > 0)
+        loss_reg = 0
+        if args.l4 > 0:
+            loss_reg = calculate_reg_loss(logits, target_adj, device) # 0.0
+
         preds = torch.argmax(train_logits, dim=1)
         cls_loss = loss_fn(train_logits, train_labels)
-        # Use a small coefficient for reconstruction loss to avoid overwhelming the classification loss
-        loss_rec_coeff = 0.01 if is_heterophilic else 0.1
-        loss = args.l1 * cls_loss + args.l2 * smmd_loss_f +  args.l3 * ct_loss + loss_rec_coeff * loss_rec
-        # loss = args.l1 * cls_loss + args.l2 * 0.0 +  args.l3 * ct_loss + loss_rec_coeff * loss_rec
-        
-        # Check for NaN in loss before backward pass
-        if torch.isnan(loss):
-            print(f"Warning: NaN detected in loss at epoch {epoch}")
-            print(f"cls_loss: {cls_loss}, smmd_loss_f: {smmd_loss_f}, ct_loss: {ct_loss}, loss_rec: {loss_rec}")
-            optimizer.zero_grad()
-            continue
-            
+        loss = args.l1 * cls_loss + args.l2 * smmd_loss_f +  args.l3 * ct_loss + args.l4 * loss_reg
         loss.backward()
-        
-        # Add gradient clipping to prevent gradient explosion
-        grad_norm = torch.nn.utils.clip_grad_norm_(projector.parameters(), max_norm=1.0)
-        torch.nn.utils.clip_grad_norm_(logreg.parameters(), max_norm=1.0)
-        torch.nn.utils.clip_grad_norm_(gnn2.parameters(), max_norm=1.0)
-        
-        # Check gradient norm
-        if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-            print(f"Warning: Invalid gradient norm {grad_norm} at epoch {epoch}")
-            optimizer.zero_grad()
-            continue
-        
         optimizer.step()
 
         train_acc = torch.sum(preds == train_labels).float() / train_labels.shape[0]
@@ -286,17 +222,27 @@ def transfer(args, config, gpu_id, is_reduction):
             test_preds = torch.argmax(test_logits, dim=1)
             val_acc = torch.sum(val_preds == val_labels).float() / val_labels.shape[0]
             test_acc = torch.sum(test_preds == test_labels).float() / test_labels.shape[0]
-            print('Epoch: {}, train_acc: {:.4f}, val_acc: {:4f}, test_acc: {:4f}'.format(epoch, train_acc, val_acc, test_acc))
+            log_output('Epoch: {:03d}, train_acc: {:.4f}, val_acc: {:.4f}, test_acc: {:.4f}'.format(epoch, train_acc, val_acc, test_acc), args)
             if max_acc < val_acc:
                 max_acc = val_acc
                 max_test_acc = test_acc
                 max_epoch = epoch + 1
-    print('epoch: {}, val_acc: {:4f}, test_acc: {:4f}'.format(max_epoch, max_acc, max_test_acc))
+    log_output('\n' + '='*80, args)
+    log_output('Best Results:', args)
+    log_output('Best epoch: {}, val_acc: {:.4f}, test_acc: {:.4f}'.format(max_epoch, max_acc, max_test_acc), args)
+    log_output('Final Results:', args)
+    log_output('Final epoch: {}, val_acc: {:.4f}, test_acc: {:.4f}'.format(epoch + 1, val_acc, test_acc), args)
+    log_output('='*80, args)
     result_path = './result'
     mkdir(result_path)
     if args.few:
         with open(result_path + '/GraphLoRA.txt', 'a') as f:
-            f.write('Few: True, r: %d, Shot: %d, %s to %s: val_acc: %f, test_acc: %f\n'%(args.r, args.shot, args.pretrain_dataset, args.test_dataset, max_acc, max_test_acc))
+            f.write('Few: True, r: %d, Shot: %d, %s to %s: BEST val_acc: %f, test_acc: %f | FINAL val_acc: %f, test_acc: %f\n'%(args.r, args.shot, args.pretrain_dataset, args.test_dataset, max_acc, max_test_acc, val_acc, test_acc))
     else:
         with open(result_path + '/GraphLoRA.txt', 'a') as f:
-            f.write('Few: False, r: %d, %s to %s: val_acc: %f, test_acc: %f\n'%(args.r, args.pretrain_dataset, args.test_dataset, max_acc, max_test_acc))
+            f.write('Few: False, r: %d, %s to %s: BEST val_acc: %f, test_acc: %f | FINAL val_acc: %f, test_acc: %f\n'%(args.r, args.pretrain_dataset, args.test_dataset, max_acc, max_test_acc, val_acc, test_acc))
+    
+    # Also save summary to log file if logging is enabled
+    if hasattr(args, 'use_logging') and args.use_logging and hasattr(args, 'log_file'):
+        log_output('\nResults saved to: ' + result_path + '/GraphLoRA.txt', args)
+        log_output('Log file saved to: ' + args.log_file, args)
