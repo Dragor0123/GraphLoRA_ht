@@ -204,7 +204,7 @@ def transfer(args, config, gpu_id, is_reduction):
         # Calculate regularization loss if enabled (args.l4 > 0)
         loss_reg = 0
         if args.l4 > 0:
-            loss_reg = calculate_reg_loss(logits, target_adj, device) # 0.0
+            loss_reg = 0.0 #calculate_reg_loss(logits, target_adj, device) # 0.0
 
         preds = torch.argmax(train_logits, dim=1)
         cls_loss = loss_fn(train_logits, train_labels)
