@@ -205,3 +205,5 @@ Few: False, r: 32, Chameleon to Actor: BEST val_acc: 0.119737, test_acc: 0.12203
 Few: False, r: 32, Chameleon to Texas: BEST val_acc: 0.277778, test_acc: 0.176871 | FINAL val_acc: 0.277778, test_acc: 0.176871
 Few: False, r: 32, Chameleon to Texas: BEST val_acc: 0.166667, test_acc: 0.176871 | FINAL val_acc: 0.166667, test_acc: 0.176871
 Few: False, r: 32, Chameleon to Texas: BEST val_acc: 0.222222, test_acc: 0.095238 | FINAL val_acc: 0.111111, test_acc: 0.190476
+Few: False, r: 32, PubMed to Squirrel: BEST val_acc: 0.255769, test_acc: 0.229031 | FINAL val_acc: 0.226923, test_acc: 0.227830
+Few: False, r: 32, PubMed to Actor: BEST val_acc: 0.301316, test_acc: 0.284046 | FINAL val_acc: 0.288158, test_acc: 0.286349

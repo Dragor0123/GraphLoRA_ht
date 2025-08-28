@@ -159,6 +159,21 @@ def batched_gct_loss(z1: torch.Tensor, z2: torch.Tensor, batch_size: int, mask, 
     return torch.cat(losses)
 
 
+def batched_mmd_loss(z1: torch.Tensor, z2, MMD, batch_size):
+    device = z1.device
+    num_nodes = z1.size(0)
+    num_batches = (num_nodes - 1) // batch_size + 1
+    indices = torch.arange(0, num_nodes).to(device)
+    losses = []
+
+    for i in range(num_batches):
+        mask = indices[i * batch_size:(i + 1) * batch_size]
+        target = next(iter(z2))
+        losses.append(MMD(z1[mask], target))
+
+    return torch.stack(losses).mean()
+
+
 def batched_smmd_loss(z1: torch.Tensor, z2, MMD, ppr_weight, batch_size):
     device = z1.device
     num_nodes = z1.size(0)
