@@ -4,7 +4,7 @@ import torch.nn as nn
 import os
 from torch_geometric.transforms import SVDFeatureReduction
 from util import get_dataset, act, SMMDLoss, mkdir, get_ppr_weight
-from util import get_few_shot_mask, batched_smmd_loss, batched_gct_loss
+from util import get_few_shot_mask, batched_smmd_loss, batched_gct_loss, batched_mmd_loss
 from torch_geometric.utils import to_dense_adj, add_remaining_self_loops
 import torch.nn.functional as F
 import numpy as np
@@ -52,6 +52,10 @@ def calculate_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, ba
         smmd_loss: Computed SMMD loss value
     """
     return batched_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, batch_size)
+
+
+def calculate_mmd_loss(feature_map, pretrain_graph_loader, MMD, batch_size=128):
+    return batched_mmd_loss(feature_map, pretrain_graph_loader, MMD, batch_size)
 
 
 def calculate_reg_loss(logits, target_adj, device):
@@ -193,7 +197,8 @@ def transfer(args, config, gpu_id, is_reduction):
         # Calculate SMMD loss if enabled (args.l2 > 0)
         smmd_loss_f = 0
         if args.l2 > 0:
-            smmd_loss_f = calculate_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, 128)
+            # smmd_loss_f = calculate_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, 128)
+            smmd_loss_f = calculate_mmd_loss(feature_map, pretrain_graph_loader, SMMD, 128)
         
         # Calculate contrastive loss
         ct_loss = 0.5 * (batched_gct_loss(emb1, emb2, 1000, mask, args.tau) + batched_gct_loss(emb2, emb1, 1000, mask, args.tau)).mean()
@@ -204,7 +209,7 @@ def transfer(args, config, gpu_id, is_reduction):
         # Calculate regularization loss if enabled (args.l4 > 0)
         loss_reg = 0
         if args.l4 > 0:
-            loss_reg = calculate_reg_loss(logits, target_adj, device) # 0.0
+            loss_reg = 0.0 #calculate_reg_loss(logits, target_adj, device) # 0.0
 
         preds = torch.argmax(train_logits, dim=1)
         cls_loss = loss_fn(train_logits, train_labels)
