@@ -58,25 +58,57 @@ def calculate_mmd_loss(feature_map, pretrain_graph_loader, MMD, batch_size=128):
     return batched_mmd_loss(feature_map, pretrain_graph_loader, MMD, batch_size)
 
 
-def calculate_reg_loss(logits, target_adj, device):
+def compute_efficient_2hop(adj_matrix):
+    """
+    Efficiently compute EXACTLY 2-hop adjacency + self-loops.
+    
+    Args:
+        adj_matrix: Adjacency matrix (dense tensor)
+    
+    Returns:
+        Binary adjacency matrix for exactly 2-hop connections + self-loops
+    """
+    # Compute A^2 (all 2-hop paths)
+    adj_2hop_all = torch.matmul(adj_matrix, adj_matrix)
+    
+    # Remove direct 1-hop connections to get EXACTLY 2-hop
+    adj_2hop_exact = adj_2hop_all - adj_matrix
+    
+    # Convert to binary (0/1) and add self-loops
+    result = (adj_2hop_exact > 0).int()
+    result.fill_diagonal_(1)  # Add self-loops
+    
+    return result
+
+
+def calculate_reg_loss(logits, target_adj, device, use_2hop=False):
     """
     Calculate regularization loss term
     
     Args:
         logits: Output logits from the model
-        target_adj: Target adjacency matrix
+        target_adj: Target adjacency matrix  
         device: Device to run computations on
+        use_2hop: Whether to use 2-hop adjacency for heterophilic graphs
     
     Returns:
         loss_reg: Computed regularization loss
     """
-    pos_weight = float(target_adj.shape[0] * target_adj.shape[0] - target_adj.sum()) / target_adj.sum()
-    weight_mask = target_adj.view(-1) == 1
+    # Choose adjacency matrix based on graph type
+    if use_2hop:
+        #print("[DEBUG] Using 2-hop adjacency for regularization")
+        adj_matrix = compute_efficient_2hop(target_adj.float()).float()
+    else:
+        #print("[DEBUG] Using 1-hop adjacency for regularization") 
+        adj_matrix = target_adj.float()
+    
+    pos_weight = float(adj_matrix.shape[0] * adj_matrix.shape[0] - adj_matrix.sum()) / adj_matrix.sum()
+    weight_mask = adj_matrix.view(-1) == 1
     weight_tensor = torch.ones(weight_mask.size(0)).to(device)
     weight_tensor[weight_mask] = pos_weight
     
     reg_adj = torch.sigmoid(torch.matmul(torch.softmax(logits, dim=1), torch.softmax(logits, dim=1).T))
-    loss_reg = F.binary_cross_entropy(reg_adj.view(-1), target_adj.view(-1), weight=weight_tensor)
+    loss_reg = F.binary_cross_entropy(reg_adj.view(-1), adj_matrix.view(-1), weight=weight_tensor)
     
     return loss_reg
 
@@ -209,7 +241,10 @@ def transfer(args, config, gpu_id, is_reduction):
         # Calculate regularization loss if enabled (args.l4 > 0)
         loss_reg = 0
         if args.l4 > 0:
-            loss_reg = 0.0 #calculate_reg_loss(logits, target_adj, device) # 0.0
+            # Determine if dataset is heterophilic based on dataset name
+            is_heterophilic = args.test_dataset in ['Chameleon', 'Squirrel', 'Actor']
+            #print(f"[DEBUG] Dataset {args.test_dataset}: {'heterophilic' if is_heterophilic else 'homophilic'}")
+            loss_reg = calculate_reg_loss(logits, target_adj, device, use_2hop=is_heterophilic)
 
         preds = torch.argmax(train_logits, dim=1)
         cls_loss = loss_fn(train_logits, train_labels)
