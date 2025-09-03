@@ -212,8 +212,8 @@ def transfer_fourier(args, config, gpu_id, is_reduction):
     # Create contrastive learning mask
     mask = torch.zeros((test_dataset.x.shape[0], test_dataset.x.shape[0])).to(device)
     ppr_weight = get_ppr_weight(test_dataset)
-    idx_a = torch.tensor([]).to(device)
-    idx_b = torch.tensor([]).to(device)
+    idx_a = torch.empty(0, dtype=torch.long, device=device)
+    idx_b = torch.empty(0, dtype=torch.long, device=device)
     for i in range(max(test_dataset.y) + 1):
         train_idx = torch.nonzero(train_mask, as_tuple=False).squeeze()
         train_label = test_dataset.y[train_idx]
@@ -268,7 +268,8 @@ def transfer_fourier(args, config, gpu_id, is_reduction):
         # Calculate SMMD loss if enabled (args.l2 > 0)
         smmd_loss_f = 0
         if args.l2 > 0:
-            smmd_loss_f = calculate_mmd_loss(feature_map, pretrain_graph_loader, SMMD, 128)
+            smmd_loss_f = calculate_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, 128)
+            # smmd_loss_f = calculate_mmd_loss(feature_map, pretrain_graph_loader, SMMD, 128)
         
         # Calculate contrastive loss
         ct_loss = 0.5 * (batched_gct_loss(emb1, emb2, 1000, mask, args.tau) + batched_gct_loss(emb2, emb1, 1000, mask, args.tau)).mean()
@@ -279,7 +280,7 @@ def transfer_fourier(args, config, gpu_id, is_reduction):
         # Calculate regularization loss if enabled (args.l4 > 0)
         loss_reg = 0
         if args.l4 > 0:
-            loss_reg = 0.0  # calculate_reg_loss(logits, target_adj, device) # Disabled for now
+            loss_reg = calculate_reg_loss(logits, target_adj, device)
 
         preds = torch.argmax(train_logits, dim=1)
         cls_loss = loss_fn(train_logits, train_labels)
@@ -288,11 +289,19 @@ def transfer_fourier(args, config, gpu_id, is_reduction):
         optimizer.step()
 
         train_acc = torch.sum(preds == train_labels).float() / train_labels.shape[0]
+        
+        # Evaluation with updated parameters
         logreg.eval()
-        projector.eval()
+        projector.eval() 
+        gnn_fourier.eval()
         with torch.no_grad():
-            val_logits = logits[val_mask]
-            test_logits = logits[test_mask]
+            # Re-compute embeddings and logits with updated parameters
+            feature_map_eval = projector(test_dataset.x)
+            emb_eval, _, _ = gnn_fourier(feature_map_eval, test_dataset.edge_index)
+            logits_eval = logreg(emb_eval)
+            
+            val_logits = logits_eval[val_mask]
+            test_logits = logits_eval[test_mask]
             val_preds = torch.argmax(val_logits, dim=1)
             test_preds = torch.argmax(test_logits, dim=1)
             val_acc = torch.sum(val_preds == val_labels).float() / val_labels.shape[0]
@@ -302,6 +311,7 @@ def transfer_fourier(args, config, gpu_id, is_reduction):
                 max_acc = val_acc
                 max_test_acc = test_acc
                 max_epoch = epoch + 1
+        gnn_fourier.train()
                 
     # Final results
     log_output('\n' + '='*80, args)
