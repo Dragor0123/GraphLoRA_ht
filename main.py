@@ -8,6 +8,7 @@ import os
 from datetime import datetime
 from pre_train import pretrain
 from model.GraphLoRA import transfer
+from model.GraphFourierFT import transfer_fourier
 from util import get_parameter
 
 
@@ -36,7 +37,10 @@ if __name__ == '__main__':
     parser.add_argument('--shot', type=int, default=10)
     parser.add_argument('--tau', type=float, default=0.5)
     parser.add_argument('--sup_weight', type=float, default=0.2)
-    parser.add_argument('--r', type=int, default=32)
+    parser.add_argument('--method', type=str, default='lora', choices=['lora', 'fourier'], help='Choose fine-tuning method: lora or fourier')
+    parser.add_argument('--r', type=int, default=32, help='LoRA rank (only used when method=lora)')
+    parser.add_argument('--n', type=int, default=1000, help='Number of spectral coefficients for FourierFT (only used when method=fourier)')
+    parser.add_argument('--alpha', type=float, default=300.0, help='Scaling factor for FourierFT (only used when method=fourier)')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--use_logging', type=bool, default=False, help='Save results to log file instead of printing')
     parser.add_argument('--log_dir', type=str, default='./logs', help='Directory to save log files')
@@ -63,4 +67,11 @@ if __name__ == '__main__':
     
     if args.is_transfer:
         config_transfer = yaml.load(open(args.config), Loader=SafeLoader)['transfer']
-        transfer(args, config_transfer, args.gpu_id, args.is_reduction)
+        if args.method == 'lora':
+            print(f"Using LoRA method with rank r={args.r}")
+            transfer(args, config_transfer, args.gpu_id, args.is_reduction)
+        elif args.method == 'fourier':
+            print(f"Using FourierFT method with n={args.n}, alpha={args.alpha}")
+            transfer_fourier(args, config_transfer, args.gpu_id, args.is_reduction)
+        else:
+            raise ValueError(f"Unknown method: {args.method}")

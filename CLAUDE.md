@@ -1,90 +1,237 @@
-<!-- 작업내용 : model/GraphLoRA.py의 코드에서 다음 두 loss term에 대한 논리 흐름을 정리한 후, 공통된 부분은 앞에 두고, 분기된 이후부터의 계산 경로를 각각 모듈화 해라.
-각 loss에 대해 함수 호출로 바로 가져오도록 하여 개발자가 해당 loss term을 on/off 하기 편하게 만들어라.
+# 📑 GraphFourierFT Program Design Document (with Scaffold)
 
-## 완료된 작업 (2025-08-27)
-1. **SMMD loss 모듈화**: `calculate_smmd_loss()` 함수로 분리
-   - feature_map을 입력받아 SMMD loss 계산
-   - `args.l2 > 0` 조건으로 on/off 제어 가능
+------------------------------------------------------------------------
 
-2. **Regularization loss 모듈화**: `calculate_reg_loss()` 함수로 분리  
-   - logits와 target_adj를 입력받아 regularization loss 계산
-   - `args.l4 > 0` 조건으로 on/off 제어 가능
+## 1. Objective
 
-3. **중복 코드 제거**
-   - training loop 밖에 있던 불필요한 weight_tensor 초기화 코드 제거
-   - 실제로는 calculate_reg_loss 함수 내에서 매번 계산됨
+Replace the **LoRA components** in GraphLoRA with **FourierFT
+adapters**, while preserving the original training pipeline
+(pretraining, transfer learning, four-part loss). Add logging utilities
+to directly compare **parameter efficiency and memory usage** of LoRA vs
+FourierFT.
 
-1. SMMD loss term의 코드 라인
-test_dataset = get_dataset(test_datapath, args.test_dataset)[0]
-if is_reduction:
-    feature_reduce = SVDFeatureReduction(out_channels=100)
-    pretrain_dataset = feature_reduce(pretrain_dataset)
-    test_dataset = feature_reduce(test_dataset)
-pretrain_dataset.edge_index = add_remaining_self_loops(pretrain_dataset.edge_index)[0]
-test_dataset.edge_index = add_remaining_self_loops(test_dataset.edge_index)[0]
-pretrain_dataset = pretrain_dataset.to(device)
-test_dataset = test_dataset.to(device)
+Please refer to the file ./FourierFT/FourierFT.pdf or ./FourierFT/FourierFT_Methodology_Summary.pdf for help with implementation.
+------------------------------------------------------------------------
 
-ppr_weight = get_ppr_weight(test_dataset)
+## 2. Key Requirements
 
-pretrain_graph_loader = DataLoader(pretrain_dataset.x, batch_size=128, shuffle=True)
+1.  **Loss Consistency**: Keep
 
-feature_map = projector(test_dataset.x)
+    $$\mathcal{L} = \lambda_1 L_{cls} + \lambda_2 L_{smmd} + \lambda_3 L_{contrastive} + \lambda_4 L_{struct\_reg}$$
+    exactly as in GraphLoRA.
+2.  **Parameter-Efficient Tuning**: Replace only the **LoRA branch**
+    with FourierFT. Projector, LogReg, and backbone GNN remain as in
+    GraphLoRA.
+3.  **Memory Logging**:
+    -   Log **total learnable parameters**.\
+    -   Log **adapter-only parameters** (LoRA or FourierFT).\
+    -   Print memory (MB) for both, to allow efficiency comparison.\
+4.  **Compatibility**: Keep interface signatures consistent with
+    GraphLoRA for seamless integration.
 
-smmd_loss_f = batched_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, 128)
-loss = args.l1 * cls_loss + args.l2 * smmd_loss_f +  args.l3 * ct_loss + args.l4 * loss_reg
+------------------------------------------------------------------------
 
-2. loss_reg
-# feature_map 계산전까지는 SMMD loss term 계산 경로와 동일
-feature_map = projector(test_dataset.x)
-emb, emb1, emb2 = gnn2(feature_map, test_dataset.edge_index)
-logits = logreg(emb)
+## 3. Module Overview
 
-reg_adj = torch.sigmoid(torch.matmul(torch.softmax(logits, dim=1), torch.softmax(logits, dim=1).T))
-loss_reg = F.binary_cross_entropy(reg_adj.view(-1), target_adj.view(-1), weight=weight_tensor)
+### 3.1 FourierFT Adapter (new)
 
-loss = args.l1 * cls_loss + args.l2 * smmd_loss_f +  args.l3 * ct_loss + args.l4 * loss_reg -->
+**File:** `model/FourierFT_adapter.py`\
+**Class:** `FourierFTAdapter`\
+**Signature:**
 
-<!-- 2025년 08월 28일
-Task 1. batched_mmd_loss 함수 정의하기
-Detail instruction: 
-- util.py의 batched_smmd_loss와 거의 유사하게 동작하되, ppr을 사용한 structure-aware 요소가 사라진 버전, 이른바
-SMMD가 아닌 Original MMD만을 사용하는 함수를 만들어라.
-- 최대한 batched_smmd_loss와 함수 시그니쳐가 비슷하게 만들되 ppr_weight를 인자로 취하지 않으면 된다.
-
+``` python
+class FourierFTAdapter(nn.Module):
+    def __init__(self, d_in, d_out, n=1000, alpha=1.0, base_layer=None):
+        ...
+    def forward(self, x, edge_index):
+        ...
 ```
-# batched_smmd_loss : Structure-aware Maximum MeanDiscrepancy using personalized pagerank
-def batched_smmd_loss(z1: torch.Tensor, z2, MMD, ppr_weight, batch_size):
-    device = z1.device
-    num_nodes = z1.size(0)
-    num_batches = (num_nodes - 1) // batch_size + 1
-    indices = torch.arange(0, num_nodes).to(device)
-    losses = []
 
-    for i in range(num_batches):
-        mask = indices[i * batch_size:(i + 1) * batch_size]
-        ppr = ppr_weight[mask][:, mask]
-        target = next(iter(z2))
-        losses.append(MMD(z1[mask], target, ppr))
+**Responsibilities**: - Store **randomly chosen spectral entries E**
+(frozen across all layers).\
+- Maintain **trainable coefficients c (size n)**.\
+- Build spectral matrix F with coefficients placed at entries E.\
+- Compute ΔW = IDFT(F) (use `torch.fft.ifft2`) and merge with base layer
+weights.\
+- Return updated embeddings.
 
-    return torch.stack(losses).mean()
+**Notes for engineer**: - You do not need to optimize IDFT; use
+PyTorch's FFT utilities.\
+- Ensure ΔW has the same shape as the base GNN weight matrix.
 
-작업 완료: 25.08.28, 13시 20분.
-``` -->
+------------------------------------------------------------------------
 
+### 3.2 GNN with FourierFT
 
-* 참고용
-| Dataset | Nodes | Edges | Classes | Features |
-|:---|---:|---:|---:|---:|
-| Cora | 2,708 | 10,556 | 7 | 1,433 |
-| CiteSeer | 3,327 | 9,104 | 6 | 3,703 |
-| PubMed | 19,717 | 88,648 | 3 | 500 |
-| Computers | 13,752 | 491,722 | 10 | 767 |
-| Photo | 7,650 | 238,162 | 8 | 745 |
-||
-| Cornell | 183 | 295 | 5 | 1,703 |
-| Texas | 183 | 309 | 5 | 1,703 |
-| Wisconsin | 251 | 499 | 5 | 1,703 | 
-| Chameleon | 2,277 | 36,051 | 5 | 2,325 |
-| Squirrel | 5,201 | 216,933 | 5 | 2,089 | 
-| Actor | 7,600 | 29,926 | 5 | 932 | 
+**File:** `model/GNN_FourierFT.py`\
+**Class:** `GNNFourierFT`\
+**Signature:**
+
+``` python
+class GNNFourierFT(nn.Module):
+    def __init__(self, gnn, gnn_type, gnn_layer_num, d_in, d_out, n, alpha):
+        ...
+    def forward(self, x, edge_index):
+        ...
+```
+
+**Responsibilities**: - Wrap pretrained GNN (frozen).\
+- For each fine-tuned layer (matching LoRA logic), attach a
+FourierFTAdapter.\
+- Forward pass = base output + FourierFT update.\
+- Return embeddings `(emb, emb_base, emb_fourier)` for downstream loss
+terms.
+
+------------------------------------------------------------------------
+
+### 3.3 Transfer Function
+
+**File:** `model/GraphFourierFT.py`\
+**Function:** `transfer_fourier(args, config, gpu_id, is_reduction)`
+
+**Responsibilities**: - Same structure as `GraphLoRA.transfer()`.\
+- Load pretrained GNN.\
+- Freeze base parameters.\
+- Replace LoRA injection (`GNNLoRA`) with `GNNFourierFT`.\
+- Initialize Projector, LogReg, optimizer groups.\
+- Compute four losses each epoch, log training/validation/test accuracy.
+
+**Additional Logging**: - Use utility `print_trainable_parameters()`
+(already in `util.py`) but extend to: - Print **adapter-only params**
+(FourierFT coefficients only).\
+- Print **all trainable params** (adapter + projector + classifier).\
+- Example log output:
+`Adapter params (FourierFT): 64K (0.25 MB)   Total trainable params: 1.2M (4.8 MB)`
+
+------------------------------------------------------------------------
+
+### 3.4 Memory Logging Utility
+
+**File:** `util.py` (extend existing)\
+**Function:**
+
+``` python
+def print_memory_usage(model, adapter_module_names=[]):
+    ...
+```
+
+-   Report:
+    -   Total trainable parameters (count + MB).\
+    -   Adapter-only parameters (count + MB).\
+-   Identify adapters via `adapter_module_names` or isinstance check.
+
+------------------------------------------------------------------------
+
+## 4. Workflow
+
+1.  **Pretraining**
+    -   No change. Use `pre_train.py` with GRACE.\
+2.  **Transfer (FourierFT)**
+    -   Replace call to `GraphLoRA.transfer` with
+        `GraphFourierFT.transfer_fourier`.\
+    -   Attach FourierFT adapters instead of LoRA.\
+3.  **Training Loop**
+    -   Compute losses: cls, smmd, contrastive, struct_reg.\
+    -   Optimize projector + logreg + FourierFT adapters.\
+    -   Log parameter efficiency at start and after each epoch.
+
+------------------------------------------------------------------------
+
+## 5. Task Delegation Checklist
+
+**Engineer Deliverables**: 1. **Implement FourierFTAdapter** - Trainable
+coefficients, spectral entry initialization, IDFT weight
+reconstruction. - Merge ΔW with base weights in forward. 2. **Implement
+GNNFourierFT** - Attach FourierFTAdapter modules to frozen GNN layers. -
+Ensure outputs compatible with loss computation. 3. **Modify Transfer
+Function** - New `transfer_fourier()` function in `GraphFourierFT.py`. -
+Preserve 4-loss logic. 4. **Extend Logging** - Implement
+`print_memory_usage()`. - Integrate at beginning of training and
+per-epoch summary. 5. **Testing** - Run on small dataset (Cora,
+CiteSeer). - Verify losses decrease, memory logs show adapter-only
+parameters.
+
+------------------------------------------------------------------------
+
+## 6. Expected Outcomes
+
+-   Functional GraphFourierFT pipeline (pretrain + Fourier-based
+    transfer).\
+-   Logs showing reduced adapter parameter count compared to LoRA.\
+-   Accuracy comparable to baseline GraphLoRA (to be validated
+    empirically).
+
+------------------------------------------------------------------------
+
+# 📑 Scaffold for GraphFourierFT Integration
+
+## 1. Directory Scaffold (Modifications Plan)
+
+### Root level
+
+-   **`main.py`** → \[Modified\]
+    -  Add option to choose `GraphFourierFT.transfer_fourier` instead of existing `GraphLoRA.transfer` call.\
+    -   Example: Add `--method {lora, fourier}` argument.
+-   **`pre_train.py`** → \[No Change\]
+    -   GRACE pretraining logic remains unchanged.
+-   **`util.py`** → \[Modified/Added\]
+    -   Extend existing `print_trainable_parameters()`.\
+    -   \[Added\] `print_memory_usage(model, adapter_module_names=[])`:
+        output adapter-only vs total param count/MB
+
+------------------------------------------------------------------------
+
+### `model/` directory
+
+-   **`GNN_model.py`** → \[Modified\]
+    -   Keep existing `GNNLoRA` as is, but implement FourierFT version seperately.\
+    -   [Added] Or connect `GNNFourierFT` import path here.
+-   **`GRACE_model.py`** → \[No Change\]
+    -   Self-supervised pretraining logic remains unchanged.
+-   **`GraphLoRA.py`** → \[No Change\]
+    -   Keep original LoRA-based Transfer.
+-   **\[Added\] `GraphFourierFT.py`** (New File)
+    -   Function: `transfer_fourier(args, config, gpu_id, is_reduction)`\
+    -   Same pipeline as GraphLoRA.transfer but use `GNNFourierFT` instead of `GNNLoRA`.\
+    -   Add FourierFT-related logging.
+-   **\[Added\] `FourierFT_adapter.py`** (New File)
+    -   Class: `FourierFTAdapter(nn.Module)`\
+    -   Trainable coefficient c, spectral entry E, restore ΔW through IDFT.\
+    -   Return forward result by merging with base_layer.
+-   **\[Added\] `GNN_FourierFT.py`** (New File)
+    -   Class: `GNNFourierFT(nn.Module)`\
+    -   Pretrained GNN(frozen) + FourierFTAdapter branch in parallel.\
+    -   Output: `(emb, emb_base, emb_fourier)`
+
+------------------------------------------------------------------------
+
+## 2. Engineer Job Checklist
+
+1.  **Add Option** (`main.py`)
+    -   Implement `--method` argument → `'lora'` or `'fourier'`.\
+    -   Conditional branching: GraphLoRA vs GraphFourierFT.
+2.  **Implement FourierFT Adapter** (`FourierFT_adapter.py`)
+    -   `E` spectral entry matrix (Random Sampling, freeze).\
+    -   `c` coefficients (trainable).\
+    -   `ΔW = torch.fft.ifft2(F).real * α`.\
+    -   Merge with base layer output.
+3.  **Implement GNNFourierFT** (`GNN_FourierFT.py`)
+    -   Pretrained GNN freeze.\
+    -   Connect FourierFTAdapter branch in parallel.
+4.  **Implement Transfer Loop** (`GraphFourierFT.py`)
+    -   Keep loss calculation structure identical.\
+    -   Add memory usage logging.
+5.  **Extend Utility** (`util.py`)
+    -   Add `print_memory_usage()` function: output adapter-only vs total param memory.
+6.  **Testing**
+    -   Sanity check with Cora / CiteSeer / Chameleon datasets.\
+    -   Verify FourierFT adapter params difference compared to LoRA in logs.
+
+------------------------------------------------------------------------
+
+## 3. Expected Logs Example
+
+    [FourierFT] Adapter params: 64K (0.25 MB)
+    [FourierFT] Total trainable params: 1.2M (4.8 MB)
+    Epoch 1 | train_acc=0.83 | val_acc=0.80 | test_acc=0.78
+    ...

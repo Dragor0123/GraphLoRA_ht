@@ -132,6 +132,39 @@ def print_trainable_parameters(model):
     print(f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param}")
 
 
+def print_memory_usage(model, adapter_module_names=None):
+    """
+    Print memory usage for trainable parameters and adapters.
+    
+    Args:
+        model: The model to analyze
+        adapter_module_names: List of adapter module names to filter
+    """
+    total_params = 0
+    adapter_params = 0
+    
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            param_count = param.numel()
+            total_params += param_count
+            
+            # Check if this is an adapter parameter
+            if adapter_module_names:
+                for adapter_name in adapter_module_names:
+                    if adapter_name in name:
+                        adapter_params += param_count
+                        break
+            elif 'fourier' in name.lower() or 'adapter' in name.lower() or 'c' in name.split('.')[-1]:
+                adapter_params += param_count
+    
+    # Convert to MB (4 bytes per float32 parameter)
+    total_mb = total_params * 4 / (1024 * 1024)
+    adapter_mb = adapter_params * 4 / (1024 * 1024)
+    
+    print(f"Adapter params (FourierFT): {adapter_params//1000}K ({adapter_mb:.2f} MB)")
+    print(f"Total trainable params: {total_params/1000000:.1f}M ({total_mb:.1f} MB)")
+
+
 
 def sim(z1: torch.Tensor, z2: torch.Tensor):
     z1 = F.normalize(z1)

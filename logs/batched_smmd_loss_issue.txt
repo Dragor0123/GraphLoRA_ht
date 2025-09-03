@@ -1,0 +1,41 @@
+### Issue: `next(iter(z2))` in `batched_smmd_loss` / `batched_mmd_loss`
+
+In both functions, the code repeatedly calls:
+
+```python
+batch_z2 = next(iter(z2))
+```
+
+This line **creates a new iterator every time** and always fetches the **first batch** from `z2`.
+As a result, instead of iterating through the full source distribution, the loss is computed against the same subset of `z2` repeatedly. This breaks the intended alignment between source and target distributions and reduces the effectiveness of MMD/SMMD.
+
+---
+
+### Patch Direction
+
+Two options depending on the design intent:
+
+1. **Source-as-full distribution (recommended, matches GraphLoRA’s original idea):**
+   Use the entire source embedding (or precomputed source features) when comparing with each target batch:
+
+   ```python
+   for i in range(num_batches):
+       batch_z2 = z2  # full source representation
+   ```
+
+2. **True batch-wise comparison:**
+   Create an iterator once and consume it sequentially, resetting only when exhausted:
+
+   ```python
+   z2_iter = iter(z2)
+   for i in range(num_batches):
+       try:
+           batch_z2 = next(z2_iter)
+       except StopIteration:
+           z2_iter = iter(z2)
+           batch_z2 = next(z2_iter)
+   ```
+
+---
+
+✅ Either way, avoid `next(iter(z2))` inside the loop, since it always resets to the first batch.
