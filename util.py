@@ -199,10 +199,12 @@ def batched_mmd_loss(z1: torch.Tensor, z2, MMD, batch_size):
     indices = torch.arange(0, num_nodes).to(device)
     losses = []
 
+    # Get full source representation once
+    z2_full = next(iter(z2))
+
     for i in range(num_batches):
         mask = indices[i * batch_size:(i + 1) * batch_size]
-        target = next(iter(z2))
-        losses.append(MMD(z1[mask], target))
+        losses.append(MMD(z1[mask], z2_full))
 
     return torch.stack(losses).mean()
 
@@ -214,11 +216,13 @@ def batched_smmd_loss(z1: torch.Tensor, z2, MMD, ppr_weight, batch_size):
     indices = torch.arange(0, num_nodes).to(device)
     losses = []
 
+    # Get full source representation once
+    z2_full = next(iter(z2))
+
     for i in range(num_batches):
         mask = indices[i * batch_size:(i + 1) * batch_size]
         ppr = ppr_weight[mask][:, mask]
-        target = next(iter(z2))
-        losses.append(MMD(z1[mask], target, ppr))
+        losses.append(MMD(z1[mask], z2_full, ppr))
 
     return torch.stack(losses).mean()
 
