@@ -38,6 +38,29 @@ class FourierFTAdapter(nn.Module):
         
         # Initialize coefficients with small values
         nn.init.normal_(self.c, mean=0.0, std=0.01)
+        
+        # Cache for Delta_W computation
+        self._delta_w_cache = None
+        self._dirty = True
+        
+        # Register hook to invalidate cache when coefficients change
+        self.c.register_hook(lambda grad: setattr(self, '_dirty', True))
+    
+    def _compute_delta_w(self, device):
+        """
+        Compute and cache Delta_W matrix.
+        Only recomputes when coefficients have changed.
+        """
+        if self._dirty or self._delta_w_cache is None:
+            # Create dense spectral matrix F
+            F = torch.zeros(self.d_in, self.d_out, dtype=torch.complex64, device=device)
+            F[self.E[0], self.E[1]] = self.c.to(torch.complex64)
+            
+            # Compute Delta_W via inverse DFT and cache it
+            self._delta_w_cache = torch.fft.ifft2(F).real * self.alpha
+            self._dirty = False
+        
+        return self._delta_w_cache
     
     def forward(self, x, edge_index):
         """
@@ -50,12 +73,8 @@ class FourierFTAdapter(nn.Module):
         Returns:
             Updated node embeddings
         """
-        # Create dense spectral matrix F
-        F = torch.zeros(self.d_in, self.d_out, dtype=torch.complex64, device=x.device)
-        F[self.E[0], self.E[1]] = self.c.to(torch.complex64)
-        
-        # Compute Delta_W via inverse DFT
-        Delta_W = torch.fft.ifft2(F).real * self.alpha
+        # Get cached Delta_W (recomputes only if coefficients changed)
+        Delta_W = self._compute_delta_w(x.device)
         
         if self.base_layer is not None:
             # If base layer exists, apply it and add FourierFT adaptation
@@ -81,11 +100,8 @@ class GATConv_FourierFT(nn.Module):
         # Base GAT forward pass
         base_output = self.base_gat(x, edge_index)
         
-        # FourierFT adaptation - only the delta transformation
-        F = torch.zeros(self.fourier_adapter.d_in, self.fourier_adapter.d_out, 
-                       dtype=torch.complex64, device=x.device)
-        F[self.fourier_adapter.E[0], self.fourier_adapter.E[1]] = self.fourier_adapter.c.to(torch.complex64)
-        Delta_W = torch.fft.ifft2(F).real * self.fourier_adapter.alpha
+        # FourierFT adaptation using cached Delta_W
+        Delta_W = self.fourier_adapter._compute_delta_w(x.device)
         fourier_delta = torch.matmul(x, Delta_W)
         
         return base_output + fourier_delta
@@ -105,11 +121,8 @@ class TransformerConv_FourierFT(nn.Module):
         # Base TransformerConv forward pass
         base_output = self.base_transformer(x, edge_index)
         
-        # FourierFT adaptation - only the delta transformation
-        F = torch.zeros(self.fourier_adapter.d_in, self.fourier_adapter.d_out, 
-                       dtype=torch.complex64, device=x.device)
-        F[self.fourier_adapter.E[0], self.fourier_adapter.E[1]] = self.fourier_adapter.c.to(torch.complex64)
-        Delta_W = torch.fft.ifft2(F).real * self.fourier_adapter.alpha
+        # FourierFT adaptation using cached Delta_W
+        Delta_W = self.fourier_adapter._compute_delta_w(x.device)
         fourier_delta = torch.matmul(x, Delta_W)
         
         return base_output + fourier_delta

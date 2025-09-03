@@ -4,6 +4,41 @@ from torch_geometric.nn import GCNConv, GATConv, TransformerConv
 from .FourierFT_adapter import FourierFTAdapter, GATConv_FourierFT, TransformerConv_FourierFT
 
 
+def infer_layer_dimensions(layer):
+    """
+    Infer input and output dimensions from a GNN layer.
+    
+    Args:
+        layer: GNN layer (GATConv, TransformerConv, GCNConv, etc.)
+        
+    Returns:
+        tuple: (input_dim, output_dim)
+    """
+    if hasattr(layer, 'in_channels') and hasattr(layer, 'out_channels'):
+        # Handle tuple input channels (for heterogeneous graphs)
+        in_channels = layer.in_channels
+        if isinstance(in_channels, tuple):
+            in_channels = in_channels[0]  # Use source node channels
+            
+        out_channels = layer.out_channels
+        
+        # For GAT with heads, adjust output dimension
+        if hasattr(layer, 'heads') and hasattr(layer, 'concat'):
+            if layer.concat:
+                out_channels = out_channels * layer.heads
+            # If not concat, out_channels remains the same (average pooling)
+                
+        return in_channels, out_channels
+    
+    elif hasattr(layer, 'weight'):
+        # Fallback: infer from weight matrix shape
+        weight_shape = layer.weight.shape
+        return weight_shape[1], weight_shape[0]  # (in_features, out_features)
+    
+    else:
+        raise ValueError(f"Cannot infer dimensions from layer type: {type(layer)}")
+
+
 class GNNFourierFT(nn.Module):
     """
     GNN with FourierFT adapters for parameter-efficient fine-tuning.
@@ -37,88 +72,68 @@ class GNNFourierFT(nn.Module):
         if gnn_layer_num < 1:
             raise ValueError('GNN layer_num should >=1 but you set {}'.format(gnn_layer_num))
         elif gnn_layer_num == 1:
-            # Single layer case
+            # Single layer case - infer dimensions from base layer
+            layer_d_in, layer_d_out = infer_layer_dimensions(self.gnn.conv[0])
+            
             if gnn_type == 'GAT':
                 adapter = GATConv_FourierFT(
-                    self.gnn.conv[0], d_in, d_out, n, alpha
+                    self.gnn.conv[0], layer_d_in, layer_d_out, n, alpha
                 )
             elif gnn_type == 'TransformerConv':
                 adapter = TransformerConv_FourierFT(
-                    self.gnn.conv[0], d_in, d_out, n, alpha
+                    self.gnn.conv[0], layer_d_in, layer_d_out, n, alpha
                 )
             else:  # GCN or other types
-                adapter = FourierFTAdapter(d_in, d_out, n, alpha, self.gnn.conv[0])
+                adapter = FourierFTAdapter(layer_d_in, layer_d_out, n, alpha, self.gnn.conv[0])
             self.fourier_adapters.append(adapter)
             
         elif gnn_layer_num == 2:
-            # Two layer case
-            # First layer: d_in -> 2*d_out
+            # Two layer case - infer dimensions from base layers
+            layer1_d_in, layer1_d_out = infer_layer_dimensions(self.gnn.conv[0])
+            layer2_d_in, layer2_d_out = infer_layer_dimensions(self.gnn.conv[1])
+            
+            # First layer
             if gnn_type == 'GAT':
                 adapter1 = GATConv_FourierFT(
-                    self.gnn.conv[0], d_in, 2*d_out, n, alpha
+                    self.gnn.conv[0], layer1_d_in, layer1_d_out, n, alpha
                 )
             elif gnn_type == 'TransformerConv':
                 adapter1 = TransformerConv_FourierFT(
-                    self.gnn.conv[0], d_in, 2*d_out, n, alpha
+                    self.gnn.conv[0], layer1_d_in, layer1_d_out, n, alpha
                 )
             else:
-                adapter1 = FourierFTAdapter(d_in, 2*d_out, n, alpha, self.gnn.conv[0])
+                adapter1 = FourierFTAdapter(layer1_d_in, layer1_d_out, n, alpha, self.gnn.conv[0])
             self.fourier_adapters.append(adapter1)
             
-            # Second layer: 2*d_out -> d_out  
+            # Second layer
             if gnn_type == 'GAT':
                 adapter2 = GATConv_FourierFT(
-                    self.gnn.conv[1], 2*d_out, d_out, n, alpha
+                    self.gnn.conv[1], layer2_d_in, layer2_d_out, n, alpha
                 )
             elif gnn_type == 'TransformerConv':
                 adapter2 = TransformerConv_FourierFT(
-                    self.gnn.conv[1], 2*d_out, d_out, n, alpha
+                    self.gnn.conv[1], layer2_d_in, layer2_d_out, n, alpha
                 )
             else:
-                adapter2 = FourierFTAdapter(2*d_out, d_out, n, alpha, self.gnn.conv[1])
+                adapter2 = FourierFTAdapter(layer2_d_in, layer2_d_out, n, alpha, self.gnn.conv[1])
             self.fourier_adapters.append(adapter2)
             
         else:
-            # Multi-layer case
-            # First layer: d_in -> 2*d_out
-            if gnn_type == 'GAT':
-                adapter = GATConv_FourierFT(
-                    self.gnn.conv[0], d_in, 2*d_out, n, alpha
-                )
-            elif gnn_type == 'TransformerConv':
-                adapter = TransformerConv_FourierFT(
-                    self.gnn.conv[0], d_in, 2*d_out, n, alpha
-                )
-            else:
-                adapter = FourierFTAdapter(d_in, 2*d_out, n, alpha, self.gnn.conv[0])
-            self.fourier_adapters.append(adapter)
-            
-            # Middle layers: 2*d_out -> 2*d_out
-            for i in range(1, gnn_layer_num - 1):
+            # Multi-layer case - infer dimensions from each base layer
+            for i in range(gnn_layer_num):
+                layer_d_in, layer_d_out = infer_layer_dimensions(self.gnn.conv[i])
+                
                 if gnn_type == 'GAT':
                     adapter = GATConv_FourierFT(
-                        self.gnn.conv[i], 2*d_out, 2*d_out, n, alpha
+                        self.gnn.conv[i], layer_d_in, layer_d_out, n, alpha
                     )
                 elif gnn_type == 'TransformerConv':
                     adapter = TransformerConv_FourierFT(
-                        self.gnn.conv[i], 2*d_out, 2*d_out, n, alpha
+                        self.gnn.conv[i], layer_d_in, layer_d_out, n, alpha
                     )
                 else:
-                    adapter = FourierFTAdapter(2*d_out, 2*d_out, n, alpha, self.gnn.conv[i])
+                    adapter = FourierFTAdapter(layer_d_in, layer_d_out, n, alpha, self.gnn.conv[i])
                 self.fourier_adapters.append(adapter)
-                
-            # Last layer: 2*d_out -> d_out
-            if gnn_type == 'GAT':
-                adapter = GATConv_FourierFT(
-                    self.gnn.conv[-1], 2*d_out, d_out, n, alpha
-                )
-            elif gnn_type == 'TransformerConv':
-                adapter = TransformerConv_FourierFT(
-                    self.gnn.conv[-1], 2*d_out, d_out, n, alpha
-                )
-            else:
-                adapter = FourierFTAdapter(2*d_out, d_out, n, alpha, self.gnn.conv[-1])
-            self.fourier_adapters.append(adapter)
 
     def forward(self, x, edge_index):
         """
@@ -138,61 +153,29 @@ class GNNFourierFT(nn.Module):
         x_fourier = x
         
         for i in range(self.gnn_layer_num - 1):
-            # Apply FourierFT transformation
-            F = torch.zeros(x_fourier.shape[1], x_fourier.shape[1] if i == 0 else 2*self.d_out, 
-                           dtype=torch.complex64, device=x.device)
-            if i == 0:
-                target_dim = 2 * self.d_out
-            else:
-                target_dim = 2 * self.d_out
-                
-            # Resize F if necessary
-            if i == 0:
-                F = torch.zeros(x_fourier.shape[1], target_dim, dtype=torch.complex64, device=x.device)
-            else:
-                F = torch.zeros(x_fourier.shape[1], target_dim, dtype=torch.complex64, device=x.device)
-                
-            # Use adapter coefficients
+            # Use adapter's cached Delta_W
             adapter = self.fourier_adapters[i]
             if hasattr(adapter, 'fourier_adapter'):
-                E = adapter.fourier_adapter.E
-                c = adapter.fourier_adapter.c
-                alpha = adapter.fourier_adapter.alpha
+                Delta_W = adapter.fourier_adapter._compute_delta_w(x.device)
+            elif hasattr(adapter, '_compute_delta_w'):
+                Delta_W = adapter._compute_delta_w(x.device)
             else:
-                E = adapter.E
-                c = adapter.c
-                alpha = adapter.alpha
+                # Fallback for direct adapters
+                Delta_W = adapter._compute_delta_w(x.device)
                 
-            # Ensure E indices are within bounds
-            valid_mask = (E[0] < F.shape[0]) & (E[1] < F.shape[1])
-            E_valid = E[:, valid_mask]
-            c_valid = c[valid_mask]
-            
-            F[E_valid[0], E_valid[1]] = c_valid.to(torch.complex64)
-            Delta_W = torch.fft.ifft2(F).real * alpha
             x_fourier = torch.matmul(x_fourier, Delta_W)
             x_fourier = self.gnn.activation(x_fourier)
         
-        # Final layer
+        # Final layer using cached Delta_W
         final_adapter = self.fourier_adapters[-1]
-        F_final = torch.zeros(x_fourier.shape[1], self.d_out, dtype=torch.complex64, device=x.device)
-        
         if hasattr(final_adapter, 'fourier_adapter'):
-            E = final_adapter.fourier_adapter.E
-            c = final_adapter.fourier_adapter.c
-            alpha = final_adapter.fourier_adapter.alpha
+            Delta_W_final = final_adapter.fourier_adapter._compute_delta_w(x.device)
+        elif hasattr(final_adapter, '_compute_delta_w'):
+            Delta_W_final = final_adapter._compute_delta_w(x.device)
         else:
-            E = final_adapter.E
-            c = final_adapter.c
-            alpha = final_adapter.alpha
+            # Fallback for direct adapters
+            Delta_W_final = final_adapter._compute_delta_w(x.device)
             
-        # Ensure E indices are within bounds
-        valid_mask = (E[0] < F_final.shape[0]) & (E[1] < F_final.shape[1])
-        E_valid = E[:, valid_mask]
-        c_valid = c[valid_mask]
-        
-        F_final[E_valid[0], E_valid[1]] = c_valid.to(torch.complex64)
-        Delta_W_final = torch.fft.ifft2(F_final).real * alpha
         emb_fourier = torch.matmul(x_fourier, Delta_W_final)
         
         # Combined output
