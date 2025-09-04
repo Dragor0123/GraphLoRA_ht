@@ -93,39 +93,6 @@ def log_output(message, args):
         print(message)
 
 
-def print_memory_usage(model, adapter_module_names=None):
-    """
-    Print memory usage for trainable parameters and adapters.
-    
-    Args:
-        model: The model to analyze
-        adapter_module_names: List of adapter module names to filter
-    """
-    total_params = 0
-    adapter_params = 0
-    
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            param_count = param.numel()
-            total_params += param_count
-            
-            # Check if this is an adapter parameter
-            if adapter_module_names:
-                for adapter_name in adapter_module_names:
-                    if adapter_name in name:
-                        adapter_params += param_count
-                        break
-            elif 'fourier' in name.lower() or 'adapter' in name.lower():
-                adapter_params += param_count
-    
-    # Convert to MB (4 bytes per float32 parameter)
-    total_mb = total_params * 4 / (1024 * 1024)
-    adapter_mb = adapter_params * 4 / (1024 * 1024)
-    
-    print(f"Adapter params (FourierFT): {adapter_params//1000}K ({adapter_mb:.2f} MB)")
-    print(f"Total trainable params: {total_params/1000000:.1f}M ({total_mb:.1f} MB)")
-
-
 def transfer_fourier(args, config, gpu_id, is_reduction):
     """
     FourierFT-based transfer learning with Dual Encoders + ControlNet.
@@ -287,6 +254,7 @@ def transfer_fourier(args, config, gpu_id, is_reduction):
     log_output(f'   {args.pretrain_dataset} → {args.test_dataset}', args)
     log_output(f'   FourierFT: n={args.n}, α={args.alpha}', args)
     log_output(f'   Few-shot: {args.few}, Shot: {args.shot if args.few else "N/A"}', args)
+    log_output(f'   Hyperparameters: l1={args.l1}, l2={args.l2}, l3={args.l3}, l4={args.l4}', args)
     
     # Print memory usage with new function
     all_modules = [gnn_fourier, zero_mlp, projector, logreg]
@@ -295,7 +263,7 @@ def transfer_fourier(args, config, gpu_id, is_reduction):
     log_output('='*80, args)
 
     # 🔑 STEP 8: Training loop with Dual Encoders + ControlNet
-    for epoch in range(config.get('epoch1', 100)):
+    for epoch in range(args.num_epochs):
         # Set training mode for trainable modules
         gnn_fourier.train()
         zero_mlp.train()
@@ -327,7 +295,7 @@ def transfer_fourier(args, config, gpu_id, is_reduction):
         
         # Loss 2: SMMD loss (domain alignment)
         smmd_loss_f = 0
-        if config.get('lambda_map', 0) > 0:
+        if args.l2 > 0:
             smmd_loss_f = calculate_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, 128)
         
         # Loss 3: Contrastive loss (consistency between views)
@@ -336,14 +304,14 @@ def transfer_fourier(args, config, gpu_id, is_reduction):
         
         # Loss 4: Structural regularization loss
         loss_reg = 0
-        if config.get('lambda_str', 0) > 0:
+        if args.l4 > 0:
             loss_reg = calculate_reg_loss(logits, target_adj, device)
 
-        # Combined loss
-        loss = (config.get('lambda_cyc', 1) * cls_loss + 
-                config.get('lambda_map', 5) * smmd_loss_f + 
-                config.get('lambda_cos', 0) * ct_loss + 
-                config.get('lambda_str', 0) * loss_reg)
+        # Combined loss (unified with LoRA: args.l1..l4)
+        loss = (args.l1 * cls_loss + 
+                args.l2 * smmd_loss_f + 
+                args.l3 * ct_loss + 
+                args.l4 * loss_reg)
         
         loss.backward()
         optimizer.step()

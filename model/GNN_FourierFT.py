@@ -135,50 +135,41 @@ class GNNFourierFT(nn.Module):
                     adapter = FourierFTAdapter(layer_d_in, layer_d_out, n, alpha, self.gnn.conv[i])
                 self.fourier_adapters.append(adapter)
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, film_gamma=None, film_beta=None):
         """
         Forward pass with base GNN + FourierFT adapters.
+        
+        Args:
+            x: Node features
+            edge_index: Graph edge indices
+            film_gamma: FiLM multiplicative modulation
+            film_beta: FiLM additive modulation
         
         Returns:
             Tuple of (total_embedding, base_embedding, fourier_embedding)
         """
-        # Base GNN forward pass (frozen)
+        # 1) Base path (frozen GNN)
         x_base = x
         for i in range(self.gnn_layer_num - 1):
             x_base = self.gnn.conv[i](x_base, edge_index)
             x_base = self.gnn.activation(x_base)
         emb_base = self.gnn.conv[-1](x_base, edge_index)
+
+        # 2) Adapter path via wrappers
+        x_adapt = x
         
-        # FourierFT adapter forward pass - parallel path
-        x_fourier = x
+        # Set FiLM parameters to all adapters
+        for adapter in self.fourier_adapters:
+            if hasattr(adapter, 'set_film'):
+                adapter.set_film(film_gamma, film_beta)
         
+        # Forward through adapter wrappers (includes graph operations)
         for i in range(self.gnn_layer_num - 1):
-            # Use adapter's cached Delta_W
-            adapter = self.fourier_adapters[i]
-            if hasattr(adapter, 'fourier_adapter'):
-                Delta_W = adapter.fourier_adapter._compute_delta_w(x.device)
-            elif hasattr(adapter, '_compute_delta_w'):
-                Delta_W = adapter._compute_delta_w(x.device)
-            else:
-                # Fallback for direct adapters
-                Delta_W = adapter._compute_delta_w(x.device)
-                
-            x_fourier = torch.matmul(x_fourier, Delta_W)
-            x_fourier = self.gnn.activation(x_fourier)
+            x_adapt = self.fourier_adapters[i](x_adapt, edge_index)
+            x_adapt = self.gnn.activation(x_adapt)
+        emb_adapt = self.fourier_adapters[-1](x_adapt, edge_index)
         
-        # Final layer using cached Delta_W
-        final_adapter = self.fourier_adapters[-1]
-        if hasattr(final_adapter, 'fourier_adapter'):
-            Delta_W_final = final_adapter.fourier_adapter._compute_delta_w(x.device)
-        elif hasattr(final_adapter, '_compute_delta_w'):
-            Delta_W_final = final_adapter._compute_delta_w(x.device)
-        else:
-            # Fallback for direct adapters
-            Delta_W_final = final_adapter._compute_delta_w(x.device)
-            
-        emb_fourier = torch.matmul(x_fourier, Delta_W_final)
+        # 3) Compute FourierFT delta
+        emb_fourier = emb_adapt - emb_base
         
-        # Combined output
-        emb_total = emb_base + emb_fourier
-        
-        return emb_total, emb_base, emb_fourier
+        return emb_adapt, emb_base, emb_fourier

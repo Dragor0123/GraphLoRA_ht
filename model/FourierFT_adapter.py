@@ -39,6 +39,10 @@ class FourierFTAdapter(nn.Module):
         # Initialize coefficients with small values
         nn.init.normal_(self.c, mean=0.0, std=0.01)
         
+        # FiLM parameters for modulation
+        self.film_gamma = None
+        self.film_beta = None
+        
         # Cache for Delta_W computation
         self._delta_w_cache = None
         self._dirty = True
@@ -46,15 +50,35 @@ class FourierFTAdapter(nn.Module):
         # Register hook to invalidate cache when coefficients change
         self.c.register_hook(lambda grad: setattr(self, '_dirty', True))
     
+    def set_film(self, gamma=None, beta=None):
+        """
+        Set FiLM parameters for modulation.
+        
+        Args:
+            gamma: Multiplicative modulation (shape: (1, n) or compatible)
+            beta: Additive modulation (shape: (1, n) or compatible)
+        """
+        self.film_gamma = None if gamma is None else gamma.detach()
+        self.film_beta = None if beta is None else beta.detach()
+        self._dirty = True  # Force recomputation with new FiLM params
+    
     def _compute_delta_w(self, device):
         """
-        Compute and cache Delta_W matrix.
-        Only recomputes when coefficients have changed.
+        Compute and cache Delta_W matrix with optional FiLM modulation.
+        Only recomputes when coefficients or FiLM parameters have changed.
         """
         if self._dirty or self._delta_w_cache is None:
-            # Create dense spectral matrix F
+            # Apply FiLM modulation to spectral coefficients if provided
+            c = self.c
+            if self.film_gamma is not None:
+                g = self.film_gamma.to(c.device).view(-1)
+                b = (self.film_beta or 0).to(c.device).view(-1) if self.film_beta is not None else 0
+                # FiLM on spectral coefficients
+                c = g * c + b
+            
+            # Create dense spectral matrix F with modulated coefficients
             F = torch.zeros(self.d_in, self.d_out, dtype=torch.complex64, device=device)
-            F[self.E[0], self.E[1]] = self.c.to(torch.complex64)
+            F[self.E[0], self.E[1]] = c.to(torch.complex64)
             
             # Compute Delta_W via inverse DFT and cache it
             self._delta_w_cache = torch.fft.ifft2(F).real * self.alpha
@@ -95,6 +119,10 @@ class GATConv_FourierFT(nn.Module):
         super().__init__()
         self.base_gat = base_gat
         self.fourier_adapter = FourierFTAdapter(d_in, d_out, n, alpha)
+    
+    def set_film(self, gamma=None, beta=None):
+        """Pass-through method for setting FiLM parameters."""
+        self.fourier_adapter.set_film(gamma, beta)
         
     def forward(self, x, edge_index):
         # Base GAT forward pass
@@ -116,6 +144,10 @@ class TransformerConv_FourierFT(nn.Module):
         super().__init__()
         self.base_transformer = base_transformer
         self.fourier_adapter = FourierFTAdapter(d_in, d_out, n, alpha)
+    
+    def set_film(self, gamma=None, beta=None):
+        """Pass-through method for setting FiLM parameters."""
+        self.fourier_adapter.set_film(gamma, beta)
         
     def forward(self, x, edge_index):
         # Base TransformerConv forward pass

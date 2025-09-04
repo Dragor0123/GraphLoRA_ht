@@ -197,17 +197,17 @@ def pretrain_structural(dataname, config, gpu, is_reduction=False, seed=42):
     pre_trained_model_path = './pre_trained_gnn/'
     mkdir(pre_trained_model_path)
     
-    # Model parameters
+    # Model parameters with synonym mapping for config compatibility
     input_dim = k_eigs  # Use PE dimension as input
-    output_dim = struct_config['output_dim']
+    output_dim = struct_config.get('output_dim', struct_config.get('out_dim', 256))
     num_proj_dim = struct_config.get('num_proj_dim', output_dim)
-    activation = act(struct_config['activation'])
-    learning_rate = struct_config['learning_rate']
-    weight_decay = struct_config['weight_decay']
-    num_epochs = struct_config['num_epochs']
+    activation = act(struct_config.get('activation', 'relu'))
+    learning_rate = struct_config.get('learning_rate', struct_config.get('lr', 0.001))
+    weight_decay = struct_config.get('weight_decay', struct_config.get('wd', 0.0))
+    num_epochs = struct_config.get('num_epochs', struct_config.get('epochs', 1000))
     tau = struct_config.get('tau', 0.5)
-    gnn_type = struct_config['gnn_type']
-    num_layers = struct_config['num_layers']
+    gnn_type = struct_config.get('gnn_type', 'GAT')
+    num_layers = struct_config.get('num_layers', 2)
     
     # Subgraph sampling parameters
     num_subgraphs = struct_config.get('num_subgraphs', 1024)
@@ -379,17 +379,18 @@ def pretrain(dataname, pretext, config, gpu, is_reduction=False, seed=42):
     mkdir(pre_trained_model_path)
     print("create PreTrain instance...")
     input_dim = data.x.shape[1]
-    output_dim = config['output_dim']
-    num_proj_dim = config['num_proj_dim']
-    activation = act(config['activation'])
-    learning_rate = config['learning_rate']
-    weight_decay = config['weight_decay']
-    num_epochs = config['num_epochs']
-    tau = config['tau']
-    gnn_type = config['gnn_type']
-    num_layers = config['num_layers']
-    drop_edge_rate = config['drop_edge_rate']
-    drop_feature_rate = config['drop_feature_rate']
+    # Model parameters with synonym mapping for config compatibility
+    output_dim = config.get('output_dim', config.get('out_dim', 256))
+    num_proj_dim = config.get('num_proj_dim', output_dim)
+    activation = act(config.get('activation', 'relu'))
+    learning_rate = config.get('learning_rate', config.get('lr', 0.001))
+    weight_decay = config.get('weight_decay', config.get('wd', 0.0))
+    num_epochs = config.get('num_epochs', config.get('epochs', 1000))
+    tau = config.get('tau', 0.5)
+    gnn_type = config.get('gnn_type', 'GAT')
+    num_layers = config.get('num_layers', 2)
+    drop_edge_rate = config.get('drop_edge_rate', 0.4)
+    drop_feature_rate = config.get('drop_feature_rate', 0.1)
     gnn = GNN(input_dim, output_dim, activation, gnn_type, num_layers)
     if pretext == 'GRACE':
         pretrain_model = GRACE(gnn, output_dim, num_proj_dim, drop_edge_rate, drop_feature_rate, tau)

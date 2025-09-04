@@ -1,9 +1,10 @@
 from model.GNN_model import GNN, GNNLoRA
+from model.ConditionGen import build_condition_pe, ZeroMLP
 import torch
 import torch.nn as nn
 import os
 from torch_geometric.transforms import SVDFeatureReduction
-from util import get_dataset, act, SMMDLoss, mkdir, get_ppr_weight
+from util import get_dataset, act, SMMDLoss, mkdir, get_ppr_weight, load_dual_encoders
 from util import get_few_shot_mask, batched_smmd_loss, batched_gct_loss, batched_mmd_loss
 from torch_geometric.utils import to_dense_adj, add_remaining_self_loops
 import torch.nn.functional as F
@@ -89,6 +90,22 @@ def log_output(message, args):
     else:
         print(message)
 
+
+class GatingModule(nn.Module):
+    """Simple gating module for condition-based modulation."""
+    def __init__(self, condition_dim, hidden_dim=64):
+        super().__init__()
+        self.gate = nn.Sequential(
+            nn.Linear(condition_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, condition):
+        """Returns gating scalar for LoRA adaptation."""
+        return self.gate(condition)
+
 def transfer(args, config, gpu_id, is_reduction):
     device = torch.device('cuda:{}'.format(gpu_id) if torch.cuda.is_available() else 'cpu')
 
@@ -109,17 +126,56 @@ def transfer(args, config, gpu_id, is_reduction):
     # target adj
     target_adj = to_dense_adj(test_dataset.edge_index)[0]
 
-    gnn = GNN(pretrain_dataset.x.shape[1], config['output_dim'], act(config['activation']), config['gnn_type'], config['num_layers'])
-    model_path = "./pre_trained_gnn/{}.{}.{}.{}.pth".format(args.pretrain_dataset, args.pretext, config['gnn_type'], args.is_reduction)
-    gnn.load_state_dict(torch.load(model_path))
-    gnn.to(device)
-    gnn.eval()
-    for param in gnn.conv.parameters():
-        param.requires_grad = False
-
+    # Load dual encoders (Structural + Feature)
+    k_eigs = 32  # PE dimension for structural encoder
+    encoder_S, encoder_F = load_dual_encoders(
+        encoder_S_path=args.encoder_S_ckpt,
+        encoder_F_path=args.encoder_F_ckpt,
+        device=device,
+        input_dim_pe=k_eigs,
+        feature_dim=pretrain_dataset.x.shape[1],
+        output_dim=config['output_dim'],
+        gnn_type=config['gnn_type'],
+        num_layers=config['num_layers'],
+        activation_fn=act(config['activation'])
+    )
+    
+    # Use feature encoder as base for LoRA
+    gnn = encoder_F
     gnn2 = GNNLoRA(pretrain_dataset.x.shape[1], config['output_dim'], act(config['activation']), gnn, config['gnn_type'], config['num_layers'], r=args.r)
     gnn2.to(device)
     gnn2.train()
+    
+    # Initialize GraphControl components
+    log_output(f"Initializing GraphControl with condition type: {args.condition_type}", args)
+    
+    # Build condition PE
+    pe_dim = config.get('pe_dim', 32)
+    P_cond = build_condition_pe(
+        test_dataset,
+        condition_type=args.condition_type,
+        num_dim=pe_dim,
+        device=device
+    )
+    log_output(f"Condition PE shape: {P_cond.shape}", args)
+    
+    # Process condition PE through structural encoder
+    with torch.no_grad():
+        P_cond_processed = encoder_S(P_cond, test_dataset.edge_index)
+    log_output(f"Processed condition PE shape: {P_cond_processed.shape}", args)
+    
+    # Initialize ZeroMLP for FiLM generation
+    zero_mlp = ZeroMLP(
+        in_dim=config['output_dim'],  # Use output dim from structural encoder
+        hidden=128,
+        coeff_dim=config['output_dim']  # For gamma and beta
+    ).to(device)
+    
+    # Initialize gating module for minimal gating
+    gating = GatingModule(
+        condition_dim=config['output_dim'],
+        hidden_dim=64
+    ).to(device)
 
     SMMD = SMMDLoss().to(device)
 
@@ -162,7 +218,13 @@ def transfer(args, config, gpu_id, is_reduction):
         idx_b = torch.concat((idx_b, train_idx[train_label == i].repeat(len(train_idx[train_label == i]))))
     mask = torch.sparse_coo_tensor(indices=torch.stack((idx_a, idx_b)), values=torch.ones(len(idx_a)).to(device), size=[test_dataset.x.shape[0], test_dataset.x.shape[0]]).to_dense()
     mask = args.sup_weight * (mask - torch.diag_embed(torch.diag(mask))) + torch.eye(test_dataset.x.shape[0]).to(device)
-    optimizer = torch.optim.Adam([{"params": projector.parameters(), 'lr': args.lr1, 'weight_decay': args.wd1}, {"params": logreg.parameters(), 'lr': args.lr2, 'weight_decay': args.wd2}, {"params": gnn2.parameters(), 'lr': args.lr3, 'weight_decay': args.wd3}])
+    optimizer = torch.optim.Adam([
+        {"params": projector.parameters(), 'lr': args.lr1, 'weight_decay': args.wd1}, 
+        {"params": logreg.parameters(), 'lr': args.lr2, 'weight_decay': args.wd2}, 
+        {"params": gnn2.parameters(), 'lr': args.lr3, 'weight_decay': args.wd3},
+        {"params": zero_mlp.parameters(), 'lr': 1e-4, 'weight_decay': 1e-5},
+        {"params": gating.parameters(), 'lr': 1e-3, 'weight_decay': 1e-5}
+    ])
 
     test_dataset.train_mask = train_mask
     test_dataset.val_mask = val_mask
@@ -188,9 +250,24 @@ def transfer(args, config, gpu_id, is_reduction):
     for epoch in range(0, args.num_epochs):
         logreg.train()
         projector.train()
+        zero_mlp.train()
+        gating.train()
 
         feature_map = projector(test_dataset.x)
-        emb, emb1, emb2 = gnn2(feature_map, test_dataset.edge_index)
+        
+        # Generate FiLM parameters from processed condition PE
+        gamma, beta = zero_mlp(P_cond_processed)
+        
+        # Get base and LoRA embeddings
+        emb_base, _, _ = gnn(feature_map, test_dataset.edge_index)
+        emb_lora, emb1, emb2 = gnn2(feature_map, test_dataset.edge_index)
+        
+        # Apply gating based on condition (minimal gating)
+        gate_weight = gating(gamma.mean(dim=0, keepdim=True))  # Graph-level gating
+        
+        # Combine base and LoRA embeddings with gating
+        emb = emb_base + gate_weight * (emb_lora - emb_base)
+        
         train_labels = test_dataset.y[train_mask]
         optimizer.zero_grad()
 
@@ -223,10 +300,25 @@ def transfer(args, config, gpu_id, is_reduction):
         logreg.eval()
         projector.eval()
         gnn2.eval()
+        zero_mlp.eval()
+        gating.eval()
         with torch.no_grad():
             # Re-compute embeddings and logits with updated parameters
             feature_map_eval = projector(test_dataset.x)
-            emb_eval, _, _ = gnn2(feature_map_eval, test_dataset.edge_index)
+            
+            # Generate FiLM parameters (eval mode)
+            gamma_eval, beta_eval = zero_mlp(P_cond_processed)
+            
+            # Get base and LoRA embeddings
+            emb_base_eval, _, _ = gnn(feature_map_eval, test_dataset.edge_index)
+            emb_lora_eval, _, _ = gnn2(feature_map_eval, test_dataset.edge_index)
+            
+            # Apply gating
+            gate_weight_eval = gating(gamma_eval.mean(dim=0, keepdim=True))
+            
+            # Combine embeddings
+            emb_eval = emb_base_eval + gate_weight_eval * (emb_lora_eval - emb_base_eval)
+            
             logits_eval = logreg(emb_eval)
             
             val_logits = logits_eval[val_mask]

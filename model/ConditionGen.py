@@ -44,6 +44,16 @@ class ZeroMLP(nn.Module):
             if isinstance(layer, nn.Linear):
                 nn.init.zeros_(layer.weight)
                 nn.init.zeros_(layer.bias)
+        
+        # Initialize last layer bias to gamma=1, beta=0 for identity modulation at start
+        # This ensures FiLM path is active from the beginning
+        linear_layers = [m for m in self.mlp if isinstance(m, nn.Linear)]
+        if linear_layers:
+            last_layer = linear_layers[-1]
+            half = last_layer.bias.shape[0] // 2
+            with torch.no_grad():
+                last_layer.bias[:half].fill_(1.0)  # gamma initialized to 1
+                last_layer.bias[half:].fill_(0.0)  # beta initialized to 0
     
     def forward(self, P_cond):
         """

@@ -82,11 +82,12 @@ if __name__ == '__main__':
             raise ValueError(f"Unknown pretext: {args.pretext}")
     
     if args.is_transfer:
-        # Auto-set encoder checkpoint paths if not specified
+        # Auto-set encoder checkpoint paths based on naming convention
+        # Format: {dataset}.{STRUCT|FEAT}.GAT.{is_reduction}.pth
         if not args.encoder_S_ckpt:
-            args.encoder_S_ckpt = './pre_trained_gnn/STRUCT.GAT.encoder_S.pth'
+            args.encoder_S_ckpt = f'./pre_trained_gnn/{args.pretrain_dataset}.STRUCT.GAT.{args.is_reduction}.pth'
         if not args.encoder_F_ckpt:
-            args.encoder_F_ckpt = './pre_trained_gnn/GRACE.GAT.encoder_F.pth'
+            args.encoder_F_ckpt = f'./pre_trained_gnn/{args.pretrain_dataset}.FEAT.GAT.{args.is_reduction}.pth'
         
         config_transfer = yaml.load(open(args.config), Loader=SafeLoader)['transfer']
         
