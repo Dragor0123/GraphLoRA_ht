@@ -132,37 +132,117 @@ def print_trainable_parameters(model):
     print(f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param}")
 
 
-def print_memory_usage(model, adapter_module_names=None):
+def print_memory_usage(model_or_list, adapter_module_names=None, method_name="Adapter"):
     """
     Print memory usage for trainable parameters and adapters.
     
     Args:
-        model: The model to analyze
+        model_or_list: The model to analyze or list of models/modules
         adapter_module_names: List of adapter module names to filter
+        method_name: Name of the method (for display purposes)
     """
+    # Handle both single model and list of models
+    if isinstance(model_or_list, list):
+        models = model_or_list
+    else:
+        models = [model_or_list]
+    
     total_params = 0
     adapter_params = 0
     
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            param_count = param.numel()
-            total_params += param_count
-            
-            # Check if this is an adapter parameter
-            if adapter_module_names:
-                for adapter_name in adapter_module_names:
-                    if adapter_name in name:
+    for model in models:
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                param_count = param.numel()
+                total_params += param_count
+                
+                # Check if this is an adapter parameter
+                is_adapter = False
+                if adapter_module_names:
+                    for adapter_name in adapter_module_names:
+                        if adapter_name.lower() in name.lower():
+                            adapter_params += param_count
+                            is_adapter = True
+                            break
+                
+                # Default adapter detection if no specific names provided
+                if not is_adapter and not adapter_module_names:
+                    adapter_keywords = ['fourier', 'adapter', 'lora', 'zero_mlp', 'controlnet']
+                    for keyword in adapter_keywords:
+                        if keyword in name.lower():
+                            adapter_params += param_count
+                            break
+                    # For FourierFT, also check for coefficient parameters
+                    if name.split('.')[-1] == 'c' and 'fourier' in name.lower():
                         adapter_params += param_count
-                        break
-            elif 'fourier' in name.lower() or 'adapter' in name.lower() or 'c' in name.split('.')[-1]:
-                adapter_params += param_count
     
     # Convert to MB (4 bytes per float32 parameter)
     total_mb = total_params * 4 / (1024 * 1024)
     adapter_mb = adapter_params * 4 / (1024 * 1024)
     
-    print(f"Adapter params (FourierFT): {adapter_params//1000}K ({adapter_mb:.2f} MB)")
-    print(f"Total trainable params: {total_params/1000000:.1f}M ({total_mb:.1f} MB)")
+    print(f"📊 Memory Usage ({method_name}):")
+    print(f"   • Adapter-only params: {adapter_params:,} ({adapter_mb:.2f} MB)")
+    print(f"   • Total trainable params: {total_params:,} ({total_mb:.1f} MB)")
+    print(f"   • Adapter efficiency: {100 * adapter_params / total_params:.2f}%")
+    
+    return {"adapter_params": adapter_params, "total_params": total_params, 
+            "adapter_mb": adapter_mb, "total_mb": total_mb}
+
+
+def load_dual_encoders(encoder_S_path, encoder_F_path, device, input_dim_pe=32, feature_dim=None, 
+                      output_dim=256, gnn_type='GAT', num_layers=2, activation_fn=F.relu):
+    """
+    Load and freeze dual encoders (structural + feature).
+    
+    Args:
+        encoder_S_path: Path to structural encoder checkpoint
+        encoder_F_path: Path to feature encoder checkpoint  
+        device: Device to load models on
+        input_dim_pe: PE dimension for structural encoder
+        feature_dim: Feature dimension for feature encoder
+        output_dim: Output embedding dimension
+        gnn_type: GNN architecture type
+        num_layers: Number of GNN layers
+        activation_fn: Activation function
+        
+    Returns:
+        encoder_S, encoder_F: Frozen encoder models
+    """
+    from model.GNN_model import GNN
+    
+    # Load structural encoder (takes PE as input)
+    encoder_S = GNN(input_dim_pe, output_dim, activation_fn, gnn_type, num_layers)
+    if os.path.exists(encoder_S_path):
+        encoder_S.load_state_dict(torch.load(encoder_S_path, map_location=device))
+        print(f"✓ Loaded structural encoder: {encoder_S_path}")
+    else:
+        print(f"⚠ Structural encoder not found: {encoder_S_path}")
+    
+    # Load feature encoder (takes node features as input)
+    if feature_dim is None:
+        raise ValueError("feature_dim must be provided for feature encoder")
+    
+    encoder_F = GNN(feature_dim, output_dim, activation_fn, gnn_type, num_layers)
+    if os.path.exists(encoder_F_path):
+        encoder_F.load_state_dict(torch.load(encoder_F_path, map_location=device))
+        print(f"✓ Loaded feature encoder: {encoder_F_path}")
+    else:
+        print(f"⚠ Feature encoder not found: {encoder_F_path}")
+    
+    # Freeze both encoders
+    for param in encoder_S.parameters():
+        param.requires_grad = False
+    for param in encoder_F.parameters():
+        param.requires_grad = False
+    
+    encoder_S.to(device)
+    encoder_F.to(device)
+    encoder_S.eval()
+    encoder_F.eval()
+    
+    print("🔒 Both encoders frozen and ready for transfer learning")
+    
+    return encoder_S, encoder_F
 
 
 

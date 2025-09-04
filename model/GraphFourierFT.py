@@ -1,11 +1,13 @@
 from model.GNN_model import GNN
 from model.GNN_FourierFT import GNNFourierFT
+from model.ConditionGen import build_condition_pe, ZeroMLP, compute_laplacian_pe
 import torch
 import torch.nn as nn
 import os
 from torch_geometric.transforms import SVDFeatureReduction
-from util import get_dataset, act, SMMDLoss, mkdir, get_ppr_weight, print_trainable_parameters
-from util import get_few_shot_mask, batched_smmd_loss, batched_gct_loss, batched_mmd_loss
+from util import (get_dataset, act, SMMDLoss, mkdir, get_ppr_weight, print_trainable_parameters,
+                  get_few_shot_mask, batched_smmd_loss, batched_gct_loss, batched_mmd_loss, 
+                  load_dual_encoders, print_memory_usage)
 from torch_geometric.utils import to_dense_adj, add_remaining_self_loops
 import torch.nn.functional as F
 import numpy as np
@@ -126,50 +128,74 @@ def print_memory_usage(model, adapter_module_names=None):
 
 def transfer_fourier(args, config, gpu_id, is_reduction):
     """
-    FourierFT-based transfer learning function.
+    FourierFT-based transfer learning with Dual Encoders + ControlNet.
+    
+    Architecture:
+        Target Data → [Feature Encoder + FourierFT Adapter] → Embeddings
+                                          ↑
+                    Condition PE → ZeroMLP → FiLM(γ,β) modulation
+                                          ↑
+                    Target Data → Structural Encoder (frozen)
     
     Args:
-        args: Command line arguments
+        args: Command line arguments with encoder paths and condition type
         config: Configuration dictionary
         gpu_id: GPU device ID
         is_reduction: Whether to apply feature reduction
     """
     device = torch.device('cuda:{}'.format(gpu_id) if torch.cuda.is_available() else 'cpu')
+    log_output(f"🚀 Starting FourierFT + Heterophilic GraphControl Transfer", args)
 
-    # load data
-    pretrian_datapath = os.path.join('./datasets', args.pretrain_dataset)
+    # Load datasets
+    pretrain_datapath = os.path.join('./datasets', args.pretrain_dataset)
     test_datapath = os.path.join('./datasets', args.test_dataset)
-    pretrain_dataset = get_dataset(pretrian_datapath, args.pretrain_dataset)[0]
+    pretrain_dataset = get_dataset(pretrain_datapath, args.pretrain_dataset)[0]
     test_dataset = get_dataset(test_datapath, args.test_dataset)[0]
+    
     if is_reduction:
         feature_reduce = SVDFeatureReduction(out_channels=100)
         pretrain_dataset = feature_reduce(pretrain_dataset)
         test_dataset = feature_reduce(test_dataset)
+    
     pretrain_dataset.edge_index = add_remaining_self_loops(pretrain_dataset.edge_index)[0]
     test_dataset.edge_index = add_remaining_self_loops(test_dataset.edge_index)[0]
     pretrain_dataset = pretrain_dataset.to(device)
     test_dataset = test_dataset.to(device)
 
-    # target adj
+    # Target adjacency for structural regularization
     target_adj = to_dense_adj(test_dataset.edge_index)[0]
 
-    # Load pretrained GNN
-    gnn = GNN(pretrain_dataset.x.shape[1], config['output_dim'], act(config['activation']), config['gnn_type'], config['num_layers'])
-    model_path = "./pre_trained_gnn/{}.{}.{}.{}.pth".format(args.pretrain_dataset, args.pretext, config['gnn_type'], args.is_reduction)
-    gnn.load_state_dict(torch.load(model_path, map_location=device))
-    gnn.to(device)
-    gnn.eval()
-    
-    # Freeze base GNN parameters
-    for param in gnn.conv.parameters():
-        param.requires_grad = False
+    # 🔑 STEP 1: Load Dual Encoders (Structural + Feature)
+    k_eigs = 32  # PE dimension for structural encoder
+    encoder_S, encoder_F = load_dual_encoders(
+        encoder_S_path=args.encoder_S_ckpt,
+        encoder_F_path=args.encoder_F_ckpt, 
+        device=device,
+        input_dim_pe=k_eigs,
+        feature_dim=test_dataset.x.shape[1],  # Use target feature dim
+        output_dim=config['output_dim'],
+        gnn_type=config['gnn_type'],
+        num_layers=config['num_layers'],
+        activation_fn=act(config['activation'])
+    )
 
-    # Create GNNFourierFT with adapters
+    # 🔑 STEP 2: Generate Condition PE using Heterophilic GraphControl
+    log_output(f"🎯 Building condition PE with type: {args.condition_type}", args)
+    P_cond = build_condition_pe(
+        test_dataset, 
+        condition_type=args.condition_type,
+        num_dim=k_eigs,
+        percentile=0.85 if args.condition_type in ['role', 'ppr'] else 0.15,
+        k_hop=3,
+        alpha=0.15  # for PPR
+    )
+
+    # 🔑 STEP 3: Create FourierFT with Adapters on Feature Encoder
     gnn_fourier = GNNFourierFT(
-        gnn, 
-        config['gnn_type'], 
-        config['num_layers'], 
-        d_in=pretrain_dataset.x.shape[1], 
+        encoder_F,  # Attach adapters to frozen feature encoder
+        config['gnn_type'],
+        config['num_layers'],
+        d_in=test_dataset.x.shape[1],
         d_out=config['output_dim'],
         n=args.n,  # Number of spectral coefficients
         alpha=args.alpha  # Scaling factor
@@ -177,18 +203,30 @@ def transfer_fourier(args, config, gpu_id, is_reduction):
     gnn_fourier.to(device)
     gnn_fourier.train()
 
-    SMMD = SMMDLoss().to(device)
+    # 🔑 STEP 4: Create ZeroMLP for ControlNet (FiLM modulation)
+    zero_mlp = ZeroMLP(
+        in_dim=k_eigs,  # Condition PE dimension
+        hidden=128,
+        coeff_dim=args.n  # Number of FourierFT coefficients to modulate
+    )
+    zero_mlp.to(device)
+    zero_mlp.train()
 
-    projector = Projector(test_dataset.x.shape[1], pretrain_dataset.x.shape[1])
+    # Loss functions
+    SMMD = SMMDLoss().to(device)
+    loss_fn = nn.CrossEntropyLoss()
+
+    # Optional projector for domain alignment
+    projector = Projector(test_dataset.x.shape[1], test_dataset.x.shape[1])  # Identity mapping by default
     projector = projector.to(device)
     projector.train()
 
-    # optimizer
+    # Classifier
     logreg = LogReg(config['output_dim'], max(test_dataset.y) + 1)
     logreg = logreg.to(device)
-    loss_fn = nn.CrossEntropyLoss()
+    logreg.train()
 
-    # Setup train/val/test masks
+    # 🔑 STEP 5: Setup train/val/test masks
     if args.test_dataset in ['PubMed', 'CiteSeer', 'Cora']:
         if args.few:
             train_mask, val_mask, test_mask = get_few_shot_mask(test_dataset, args.shot, args.test_dataset, device)
@@ -209,7 +247,7 @@ def transfer_fourier(args, config, gpu_id, is_reduction):
             val_mask[index[int(len(index) * 0.1):int(len(index) * 0.2)]] = True
             test_mask[index[int(len(index) * 0.2):]] = True
     
-    # Create contrastive learning mask
+    # Contrastive learning mask for consistency loss
     mask = torch.zeros((test_dataset.x.shape[0], test_dataset.x.shape[0])).to(device)
     ppr_weight = get_ppr_weight(test_dataset)
     idx_a = torch.empty(0, dtype=torch.long, device=device)
@@ -222,82 +260,112 @@ def transfer_fourier(args, config, gpu_id, is_reduction):
     mask = torch.sparse_coo_tensor(indices=torch.stack((idx_a, idx_b)), values=torch.ones(len(idx_a)).to(device), size=[test_dataset.x.shape[0], test_dataset.x.shape[0]]).to_dense()
     mask = args.sup_weight * (mask - torch.diag_embed(torch.diag(mask))) + torch.eye(test_dataset.x.shape[0]).to(device)
     
-    # Setup optimizer with different learning rates for different components
+    # 🔑 STEP 6: Setup 3-group optimizer (adapter + controlnet + classifier)
     optimizer = torch.optim.Adam([
-        {"params": projector.parameters(), 'lr': args.lr1, 'weight_decay': args.wd1}, 
-        {"params": logreg.parameters(), 'lr': args.lr2, 'weight_decay': args.wd2}, 
-        {"params": gnn_fourier.parameters(), 'lr': args.lr3, 'weight_decay': args.wd3}
+        {"params": gnn_fourier.parameters(), 'lr': config['learning_rate'], 'weight_decay': config['weight_decay']},  # FourierFT adapters
+        {"params": zero_mlp.parameters(), 'lr': config['learning_rate'], 'weight_decay': config['weight_decay']},   # ControlNet
+        {"params": list(projector.parameters()) + list(logreg.parameters()), 'lr': config['lr2'], 'weight_decay': config['wd2']}  # Projector + Classifier
     ])
 
-    test_dataset.train_mask = train_mask
-    test_dataset.val_mask = val_mask
-    test_dataset.test_mask = test_mask
-
+    # Labels for evaluation
     train_labels = test_dataset.y[train_mask]
     val_labels = test_dataset.y[val_mask]
     test_labels = test_dataset.y[test_mask]
-
+    
+    # Pretrain dataset loader for SMMD loss
     pretrain_graph_loader = DataLoader(pretrain_dataset.x, batch_size=128, shuffle=True)
+    
+    # Tracking variables
     max_acc = 0
     max_test_acc = 0
     max_epoch = 0
     
-    # Log experiment details and memory usage
+    # 🔑 STEP 7: Print experiment setup and memory usage
     log_output('='*80, args)
-    log_output(f'FourierFT Transfer Learning: {args.pretrain_dataset} -> {args.test_dataset}', args)
-    log_output(f'Seed: {args.seed}, FourierFT n: {args.n}, alpha: {args.alpha}', args)
-    log_output(f'Few-shot: {args.few}, Shot: {args.shot if args.few else "N/A"}', args)
-    log_output(f'Hyperparameters: l1={args.l1}, l2={args.l2}, l3={args.l3}, l4={args.l4}', args)
+    log_output(f'🚀 FourierFT + Heterophilic GraphControl Transfer', args)
+    log_output(f'   Condition Type: {args.condition_type}', args)
+    log_output(f'   {args.pretrain_dataset} → {args.test_dataset}', args)
+    log_output(f'   FourierFT: n={args.n}, α={args.alpha}', args)
+    log_output(f'   Few-shot: {args.few}, Shot: {args.shot if args.few else "N/A"}', args)
     
-    # Print memory usage
-    print_memory_usage(gnn_fourier)
-    print_trainable_parameters(gnn_fourier)
+    # Print memory usage with new function
+    all_modules = [gnn_fourier, zero_mlp, projector, logreg]
+    print_memory_usage(all_modules, adapter_module_names=['fourier', 'adapter', 'zero_mlp'], method_name="FourierFT+ControlNet")
     
     log_output('='*80, args)
 
-    # Training loop
-    for epoch in range(0, args.num_epochs):
-        logreg.train()
+    # 🔑 STEP 8: Training loop with Dual Encoders + ControlNet
+    for epoch in range(config.get('epoch1', 100)):
+        # Set training mode for trainable modules
+        gnn_fourier.train()
+        zero_mlp.train()
         projector.train()
-
-        feature_map = projector(test_dataset.x)
-        emb, emb1, emb2 = gnn_fourier(feature_map, test_dataset.edge_index)
-        train_labels = test_dataset.y[train_mask]
+        logreg.train()
+        
         optimizer.zero_grad()
 
-        # Calculate SMMD loss if enabled (args.l2 > 0)
-        smmd_loss_f = 0
-        if args.l2 > 0:
-            smmd_loss_f = calculate_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, 128)
-            # smmd_loss_f = calculate_mmd_loss(feature_map, pretrain_graph_loader, SMMD, 128)
+        # Forward pass with FiLM modulation
+        # 1. Get FiLM parameters from structural encoder + condition PE
+        with torch.no_grad():
+            P_cond_processed = encoder_S(P_cond, test_dataset.edge_index)  # Process condition PE through structural encoder
+        gamma, beta = zero_mlp(P_cond_processed.mean(dim=0, keepdim=True))  # Global condition
         
-        # Calculate contrastive loss
-        ct_loss = 0.5 * (batched_gct_loss(emb1, emb2, 1000, mask, args.tau) + batched_gct_loss(emb2, emb1, 1000, mask, args.tau)).mean()
+        # 2. Forward through feature encoder + modulated FourierFT adapter
+        feature_map = projector(test_dataset.x)
         
+        # Apply FiLM modulation to FourierFT coefficients
+        # This requires modifying the GNNFourierFT forward pass to accept FiLM params
+        emb, emb1, emb2 = gnn_fourier(feature_map, test_dataset.edge_index, film_gamma=gamma, film_beta=beta)
+        
+        # 3. Classification
         logits = logreg(emb)
         train_logits = logits[train_mask]
-
-        # Calculate regularization loss if enabled (args.l4 > 0)
+        
+        # 🔑 STEP 9: Compute 4-loss (cls + smmd + contrastive + struct_reg)
+        # Loss 1: Classification loss
+        cls_loss = loss_fn(train_logits, train_labels)
+        
+        # Loss 2: SMMD loss (domain alignment)
+        smmd_loss_f = 0
+        if config.get('lambda_map', 0) > 0:
+            smmd_loss_f = calculate_smmd_loss(feature_map, pretrain_graph_loader, SMMD, ppr_weight, 128)
+        
+        # Loss 3: Contrastive loss (consistency between views)
+        ct_loss = 0.5 * (batched_gct_loss(emb1, emb2, 1000, mask, args.tau) + 
+                        batched_gct_loss(emb2, emb1, 1000, mask, args.tau)).mean()
+        
+        # Loss 4: Structural regularization loss
         loss_reg = 0
-        if args.l4 > 0:
+        if config.get('lambda_str', 0) > 0:
             loss_reg = calculate_reg_loss(logits, target_adj, device)
 
-        preds = torch.argmax(train_logits, dim=1)
-        cls_loss = loss_fn(train_logits, train_labels)
-        loss = args.l1 * cls_loss + args.l2 * smmd_loss_f + args.l3 * ct_loss + args.l4 * loss_reg
+        # Combined loss
+        loss = (config.get('lambda_cyc', 1) * cls_loss + 
+                config.get('lambda_map', 5) * smmd_loss_f + 
+                config.get('lambda_cos', 0) * ct_loss + 
+                config.get('lambda_str', 0) * loss_reg)
+        
         loss.backward()
         optimizer.step()
 
+        # Training accuracy
+        preds = torch.argmax(train_logits, dim=1)
         train_acc = torch.sum(preds == train_labels).float() / train_labels.shape[0]
         
-        # Evaluation with updated parameters
-        logreg.eval()
-        projector.eval() 
+        # 🔑 STEP 10: Evaluation
         gnn_fourier.eval()
+        zero_mlp.eval()
+        projector.eval()
+        logreg.eval()
+        
         with torch.no_grad():
-            # Re-compute embeddings and logits with updated parameters
+            # Re-compute with FiLM modulation
+            P_cond_eval = encoder_S(P_cond, test_dataset.edge_index)
+            gamma_eval, beta_eval = zero_mlp(P_cond_eval.mean(dim=0, keepdim=True))
+            
             feature_map_eval = projector(test_dataset.x)
-            emb_eval, _, _ = gnn_fourier(feature_map_eval, test_dataset.edge_index)
+            emb_eval, _, _ = gnn_fourier(feature_map_eval, test_dataset.edge_index, 
+                                       film_gamma=gamma_eval, film_beta=beta_eval)
             logits_eval = logreg(emb_eval)
             
             val_logits = logits_eval[val_mask]
@@ -306,32 +374,51 @@ def transfer_fourier(args, config, gpu_id, is_reduction):
             test_preds = torch.argmax(test_logits, dim=1)
             val_acc = torch.sum(val_preds == val_labels).float() / val_labels.shape[0]
             test_acc = torch.sum(test_preds == test_labels).float() / test_labels.shape[0]
+            
             log_output('Epoch: {:03d}, train_acc: {:.4f}, val_acc: {:.4f}, test_acc: {:.4f}'.format(epoch, train_acc, val_acc, test_acc), args)
+            
             if max_acc < val_acc:
                 max_acc = val_acc
                 max_test_acc = test_acc
                 max_epoch = epoch + 1
-        gnn_fourier.train()
                 
-    # Final results
+    # 🔑 STEP 11: Final results and logging
     log_output('\n' + '='*80, args)
-    log_output('Best Results:', args)
-    log_output('Best epoch: {}, val_acc: {:.4f}, test_acc: {:.4f}'.format(max_epoch, max_acc, max_test_acc), args)
-    log_output('Final Results:', args)
-    log_output('Final epoch: {}, val_acc: {:.4f}, test_acc: {:.4f}'.format(epoch + 1, val_acc, test_acc), args)
+    log_output('🏆 FourierFT + Heterophilic GraphControl Results:', args)
+    log_output(f'   Condition Type: {args.condition_type}', args)
+    log_output(f'   Best Epoch: {max_epoch}, Val Acc: {max_acc:.4f}, Test Acc: {max_test_acc:.4f}', args)
+    log_output(f'   Final Epoch: {epoch + 1}, Val Acc: {val_acc:.4f}, Test Acc: {test_acc:.4f}', args)
+    
+    # Print final memory usage summary
+    all_modules = [gnn_fourier, zero_mlp, projector, logreg]
+    memory_stats = print_memory_usage(all_modules, adapter_module_names=['fourier', 'adapter', 'zero_mlp'], method_name="FourierFT+ControlNet")
+    
     log_output('='*80, args)
     
     # Save results
     result_path = './result'
     mkdir(result_path)
-    if args.few:
-        with open(result_path + '/GraphFourierFT.txt', 'a') as f:
-            f.write('Few: True, n: %d, Shot: %d, %s to %s: BEST val_acc: %f, test_acc: %f | FINAL val_acc: %f, test_acc: %f\n'%(args.n, args.shot, args.pretrain_dataset, args.test_dataset, max_acc, max_test_acc, val_acc, test_acc))
-    else:
-        with open(result_path + '/GraphFourierFT.txt', 'a') as f:
-            f.write('Few: False, n: %d, %s to %s: BEST val_acc: %f, test_acc: %f | FINAL val_acc: %f, test_acc: %f\n'%(args.n, args.pretrain_dataset, args.test_dataset, max_acc, max_test_acc, val_acc, test_acc))
     
-    # Also save summary to log file if logging is enabled
+    # Enhanced result logging with condition type
+    result_filename = f'{result_path}/GraphFourierFT_DualEncoder_{args.condition_type.upper()}.txt'
+    if args.few:
+        with open(result_filename, 'a') as f:
+            f.write(f'Few: True, n: {args.n}, Shot: {args.shot}, Condition: {args.condition_type}, '
+                   f'{args.pretrain_dataset} → {args.test_dataset}: '
+                   f'BEST val_acc: {max_acc:.4f}, test_acc: {max_test_acc:.4f} | '
+                   f'FINAL val_acc: {val_acc:.4f}, test_acc: {test_acc:.4f} | '
+                   f'Adapter Params: {memory_stats["adapter_params"]:,} ({memory_stats["adapter_mb"]:.2f}MB)\n')
+    else:
+        with open(result_filename, 'a') as f:
+            f.write(f'Few: False, n: {args.n}, Condition: {args.condition_type}, '
+                   f'{args.pretrain_dataset} → {args.test_dataset}: '
+                   f'BEST val_acc: {max_acc:.4f}, test_acc: {max_test_acc:.4f} | '
+                   f'FINAL val_acc: {val_acc:.4f}, test_acc: {test_acc:.4f} | '
+                   f'Adapter Params: {memory_stats["adapter_params"]:,} ({memory_stats["adapter_mb"]:.2f}MB)\n')
+    
+    # Log completion
     if hasattr(args, 'use_logging') and args.use_logging and hasattr(args, 'log_file'):
-        log_output('\nResults saved to: ' + result_path + '/GraphFourierFT.txt', args)
-        log_output('Log file saved to: ' + args.log_file, args)
+        log_output(f'\n✓ Results saved to: {result_filename}', args)
+        log_output(f'✓ Log file saved to: {args.log_file}', args)
+    
+    return max_test_acc

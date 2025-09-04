@@ -44,6 +44,12 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--use_logging', type=bool, default=False, help='Save results to log file instead of printing')
     parser.add_argument('--log_dir', type=str, default='./logs', help='Directory to save log files')
+    parser.add_argument('--condition_type', type=str, default='role', choices=['role', 'inverse', 'ppr'], 
+                        help='Condition type for Heterophilic GraphControl')
+    parser.add_argument('--encoder_S_ckpt', type=str, default=None, 
+                        help='Path to structural encoder checkpoint')
+    parser.add_argument('--encoder_F_ckpt', type=str, default=None, 
+                        help='Path to feature encoder checkpoint')
     args = parser.parse_args()
     args = get_parameter(args)
 
@@ -62,16 +68,39 @@ if __name__ == '__main__':
     torch.cuda.set_device(args.gpu_id)
 
     if args.is_pretrain:
-        config_pretrain = yaml.load(open(args.config), Loader=SafeLoader)[args.pretrain_dataset]
-        pretrain(args.pretrain_dataset, args.pretext, config_pretrain, args.gpu_id, args.is_reduction, args.seed)
+        if args.pretext == 'STRUCT':
+            # Structural pretraining - use struct config
+            config_pretrain = yaml.load(open(args.config), Loader=SafeLoader)['pretrain']['struct']
+            path_S = pretrain(args.pretrain_dataset, args.pretext, config_pretrain, args.gpu_id, args.is_reduction, args.seed)
+            print(f"✓ Structural encoder saved: {path_S}")
+        elif args.pretext == 'GRACE':
+            # Feature pretraining - use dataset-specific config
+            config_pretrain = yaml.load(open(args.config), Loader=SafeLoader)[args.pretrain_dataset]
+            path_F = pretrain(args.pretrain_dataset, args.pretext, config_pretrain, args.gpu_id, args.is_reduction, args.seed)
+            print(f"✓ Feature encoder saved: {path_F}")
+        else:
+            raise ValueError(f"Unknown pretext: {args.pretext}")
     
     if args.is_transfer:
+        # Auto-set encoder checkpoint paths if not specified
+        if not args.encoder_S_ckpt:
+            args.encoder_S_ckpt = './pre_trained_gnn/STRUCT.GAT.encoder_S.pth'
+        if not args.encoder_F_ckpt:
+            args.encoder_F_ckpt = './pre_trained_gnn/GRACE.GAT.encoder_F.pth'
+        
         config_transfer = yaml.load(open(args.config), Loader=SafeLoader)['transfer']
+        
+        print(f"🔄 Transfer Learning Setup:")
+        print(f"   • Structural Encoder: {args.encoder_S_ckpt}")
+        print(f"   • Feature Encoder: {args.encoder_F_ckpt}")
+        print(f"   • Condition Type: {args.condition_type}")
+        print(f"   • Method: {args.method}")
+        
         if args.method == 'lora':
-            print(f"Using LoRA method with rank r={args.r}")
+            print(f"   • LoRA rank: {args.r}")
             transfer(args, config_transfer, args.gpu_id, args.is_reduction)
         elif args.method == 'fourier':
-            print(f"Using FourierFT method with n={args.n}, alpha={args.alpha}")
+            print(f"   • FourierFT coefficients: {args.n}, alpha: {args.alpha}")
             transfer_fourier(args, config_transfer, args.gpu_id, args.is_reduction)
         else:
             raise ValueError(f"Unknown method: {args.method}")

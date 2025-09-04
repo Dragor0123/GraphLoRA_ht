@@ -203,6 +203,31 @@ Actor:
   epoch1: 100
   epoch2: 10000
   decay_epoch: 1000
+pretrain:
+  struct:
+    k_eigs: 32
+    subgraph_type: "rwr"         # random walk with restart
+    walk_length: 64              # reduced from 256 for faster sampling
+    restart_prob: 0.8            # probability of restarting at the origin node
+    num_subgraphs: 128           # reduced from 1024 for faster epochs  
+    batch_size: 32               # reduced from 256 for memory efficiency
+    epochs: 50                   # reduced from 200 for quicker testing
+    lr: 1e-3
+    output_dim: 256
+    num_proj_dim: 256
+    activation: 'relu'
+    gnn_type: 'GAT'
+    num_layers: 2
+    tau: 0.5
+    learning_rate: 0.001
+    weight_decay: 0
+    num_epochs: 50
+
+  grace:
+    # Existing GRACE configs inherit from dataset-specific blocks
+    output_dim: 256
+    num_proj_dim: 256
+
 transfer:
   hidden_dim: 64
   output_dim: 256
