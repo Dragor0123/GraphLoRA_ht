@@ -211,7 +211,7 @@ pretrain:
     restart_prob: 0.8            # probability of restarting at the origin node
     num_subgraphs: 128           # reduced from 1024 for faster epochs  
     batch_size: 32               # reduced from 256 for memory efficiency
-    epochs: 50                   # reduced from 200 for quicker testing
+    epochs: 1000                   # reduced from 200 for quicker testing
     lr: 1e-3
     output_dim: 256
     num_proj_dim: 256
@@ -221,7 +221,7 @@ pretrain:
     tau: 0.5
     learning_rate: 0.001
     weight_decay: 0
-    num_epochs: 50
+    num_epochs: 1000
 
   grace:
     # Existing GRACE configs inherit from dataset-specific blocks

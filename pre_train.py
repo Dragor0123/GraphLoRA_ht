@@ -120,23 +120,52 @@ class StructuralContrastiveModel(nn.Module):
         z = F.elu(self.fc1(z))
         return self.fc2(z)
     
-    def contrastive_loss(self, z1, z2):
-        """InfoNCE contrastive loss."""
+    def contrastive_loss(self, z1, z2, batch_z1=None, batch_z2=None):
+        """
+        Enhanced InfoNCE contrastive loss with better GPU utilization.
+        Supports both single-pair and batch contrastive learning.
+        """
         h1 = self.projection(z1)
         h2 = self.projection(z2)
         
-        # Pool to graph-level representation
-        h1 = h1.mean(dim=0, keepdim=True)
-        h2 = h2.mean(dim=0, keepdim=True)
+        if batch_z1 is not None and batch_z2 is not None:
+            # Batch contrastive learning for better GPU utilization
+            batch_h1 = self.projection(batch_z1)  # (batch_size, hidden_dim)
+            batch_h2 = self.projection(batch_z2)  # (batch_size, hidden_dim)
+            
+            # Pool each subgraph to graph-level
+            h1 = h1.mean(dim=0, keepdim=True)  # (1, hidden_dim)
+            h2 = h2.mean(dim=0, keepdim=True)  # (1, hidden_dim)
+            batch_h1_pooled = batch_h1.mean(dim=1, keepdim=True)  # (batch_size, 1, hidden_dim)
+            batch_h2_pooled = batch_h2.mean(dim=1, keepdim=True)  # (batch_size, 1, hidden_dim)
+            
+            # Normalize
+            h1_norm = F.normalize(h1, dim=1)
+            h2_norm = F.normalize(h2, dim=1)
+            batch_h1_norm = F.normalize(batch_h1_pooled.squeeze(1), dim=1)
+            batch_h2_norm = F.normalize(batch_h2_pooled.squeeze(1), dim=1)
+            
+            # Positive similarity
+            pos_sim = torch.exp(torch.sum(h1_norm * h2_norm, dim=1) / self.tau)
+            
+            # Negative similarities (against batch)
+            neg_sim1 = torch.exp(torch.mm(h1_norm, batch_h1_norm.t()) / self.tau).sum(dim=1)
+            neg_sim2 = torch.exp(torch.mm(h1_norm, batch_h2_norm.t()) / self.tau).sum(dim=1)
+            
+            loss = -torch.log(pos_sim / (neg_sim1 + neg_sim2 + pos_sim)).mean()
+        else:
+            # Simple pair-wise contrastive loss
+            h1 = h1.mean(dim=0, keepdim=True)
+            h2 = h2.mean(dim=0, keepdim=True)
+            
+            h1_norm = F.normalize(h1, dim=1)
+            h2_norm = F.normalize(h2, dim=1)
+            
+            pos_sim = torch.exp(torch.sum(h1_norm * h2_norm, dim=1) / self.tau)
+            neg_sim = torch.exp(torch.mm(h1_norm, h2_norm.t()) / self.tau).sum(dim=1)
+            
+            loss = -torch.log(pos_sim / neg_sim).mean()
         
-        # Compute similarity
-        h1_norm = F.normalize(h1, dim=1)
-        h2_norm = F.normalize(h2, dim=1)
-        
-        pos_sim = torch.exp(torch.sum(h1_norm * h2_norm, dim=1) / self.tau)
-        neg_sim = torch.exp(torch.mm(h1_norm, h2_norm.t()) / self.tau).sum(dim=1)
-        
-        loss = -torch.log(pos_sim / neg_sim).mean()
         return loss
 
 
@@ -200,7 +229,7 @@ def pretrain_structural(dataname, config, gpu, is_reduction=False, seed=42):
     pretrain_model.train()
     min_loss = float('inf')
     
-    model_path = pre_trained_model_path + "STRUCT.GAT.encoder_S.pth"
+    model_path = pre_trained_model_path + f"{dataname}.STRUCT.GAT.{is_reduction}.pth"
     
     print(f"Structural pretraining with {num_subgraphs} subgraphs per epoch...")
     
@@ -232,11 +261,18 @@ def pretrain_structural(dataname, config, gpu, is_reduction=False, seed=42):
                 sg2 = sample_rwr_subgraph(data.edge_index, center_node, walk_length, restart_prob, data.x.shape[0], adj_list)
                 subgraph_pairs.append((sg1, sg2))
             
-            # Compute contrastive loss for this batch
+            # Compute contrastive loss for this batch with better GPU utilization
             optimizer.zero_grad()
-            batch_loss = 0.0
+            
+            # Collect all subgraph embeddings in batch for efficient GPU computation
+            batch_z1_list = []
+            batch_z2_list = []
             
             for sg1, sg2 in subgraph_pairs:
+                # Ensure subgraph indices are on the same device as data
+                sg1 = sg1.to(device)
+                sg2 = sg2.to(device)
+                
                 # Get PE for subgraph nodes
                 pe1 = pe[sg1]
                 pe2 = pe[sg2]
@@ -245,15 +281,65 @@ def pretrain_structural(dataname, config, gpu, is_reduction=False, seed=42):
                 sg_edges1, _ = subgraph(sg1, data.edge_index, relabel_nodes=True, num_nodes=data.x.shape[0])
                 sg_edges2, _ = subgraph(sg2, data.edge_index, relabel_nodes=True, num_nodes=data.x.shape[0])
                 
-                # Forward pass
+                # Forward pass - accumulate embeddings
                 z1 = pretrain_model.forward(pe1, sg_edges1)  
                 z2 = pretrain_model.forward(pe2, sg_edges2)
                 
-                # Contrastive loss
-                loss = pretrain_model.contrastive_loss(z1, z2)
-                batch_loss += loss
+                batch_z1_list.append(z1)
+                batch_z2_list.append(z2)
             
-            batch_loss = batch_loss / current_batch_size
+            # Simplified contrastive loss computation for better GPU utilization
+            if len(batch_z1_list) >= 2:
+                # Use the first pair as anchor, others as negatives
+                anchor_z1, anchor_z2 = batch_z1_list[0], batch_z2_list[0]
+                
+                # Process batch embeddings with proper padding
+                if len(batch_z1_list) > 2:
+                    # Get all embeddings except the anchor
+                    neg_z1_list = batch_z1_list[1:]
+                    neg_z2_list = batch_z2_list[1:]
+                    
+                    # Find maximum size for padding
+                    max_nodes = max(max(z.shape[0] for z in neg_z1_list), 
+                                   max(z.shape[0] for z in neg_z2_list))
+                    
+                    padded_z1 = []
+                    padded_z2 = []
+                    
+                    for z1, z2 in zip(neg_z1_list, neg_z2_list):
+                        # Ensure both tensors have the same target size
+                        target_size = max_nodes
+                        
+                        # Pad z1
+                        if z1.shape[0] < target_size:
+                            padding1 = torch.zeros(target_size - z1.shape[0], z1.shape[1], device=device)
+                            z1_padded = torch.cat([z1, padding1], dim=0)
+                        else:
+                            z1_padded = z1[:target_size]
+                            
+                        # Pad z2
+                        if z2.shape[0] < target_size:
+                            padding2 = torch.zeros(target_size - z2.shape[0], z2.shape[1], device=device)
+                            z2_padded = torch.cat([z2, padding2], dim=0)
+                        else:
+                            z2_padded = z2[:target_size]
+                        
+                        padded_z1.append(z1_padded)
+                        padded_z2.append(z2_padded)
+                    
+                    if padded_z1:  # If we have negative samples
+                        batch_z1 = torch.stack(padded_z1, dim=0)
+                        batch_z2 = torch.stack(padded_z2, dim=0)
+                        batch_loss = pretrain_model.contrastive_loss(anchor_z1, anchor_z2, batch_z1, batch_z2)
+                    else:
+                        batch_loss = pretrain_model.contrastive_loss(anchor_z1, anchor_z2)
+                else:
+                    # Only two samples, use simple pairwise loss
+                    batch_loss = pretrain_model.contrastive_loss(anchor_z1, anchor_z2)
+            else:
+                # Single pair fallback
+                batch_loss = pretrain_model.contrastive_loss(batch_z1_list[0], batch_z2_list[0])
+            
             batch_loss.backward()
             optimizer.step()
             epoch_loss += batch_loss.item()
@@ -317,9 +403,9 @@ def pretrain(dataname, pretext, config, gpu, is_reduction=False, seed=42):
     prev = start
     pretrain_model.train()
     min_loss = 100000
-    # Update naming for consistency
+    # Consistent naming convention: STRUCT for structural, FEAT for feature encoders
     if pretext == 'GRACE':
-        model_path = pre_trained_model_path + "GRACE.GAT.encoder_F.pth"
+        model_path = pre_trained_model_path + f"{dataname}.FEAT.GAT.{is_reduction}.pth"
     else:
         model_path = pre_trained_model_path + "{}.{}.{}.{}.pth".format(dataname, pretext, gnn_type, is_reduction)
     
@@ -338,5 +424,5 @@ def pretrain(dataname, pretext, config, gpu, is_reduction=False, seed=42):
             print("+++model saved ! {}.{}.{}.pth".format(dataname, pretext, gnn_type))
     print("=== Final ===")
     
-    if pretext == 'GRACE':
-        return model_path
+    # Return model path for consistency
+    return model_path

@@ -3,11 +3,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import scipy
-import sklearn.preprocessing as preprocessing
 from torch_geometric.utils import (to_dense_adj, degree, to_undirected, remove_self_loops, 
                                    homophily, k_hop_subgraph, subgraph)
 from torch_geometric.utils.convert import to_scipy_sparse_matrix
 import scipy.sparse as sp
+
+
+def normalize_l2(x):
+    """L2 normalization without sklearn dependency."""
+    if isinstance(x, np.ndarray):
+        norm = np.linalg.norm(x, axis=1, keepdims=True)
+        return x / (norm + 1e-8)
+    else:  # torch tensor
+        norm = torch.norm(x, p=2, dim=1, keepdim=True)
+        return x / (norm + 1e-8)
 
 
 class ZeroMLP(nn.Module):
@@ -239,8 +248,9 @@ def obtain_role_attributes(data, method='struc2vec', k_hop=3, num_dim=32, percen
         L, V = torch.linalg.eigh(Lap)
     
     x = V[:, :num_dim].float()
-    x = preprocessing.normalize(x.cpu(), norm="l2")
-    x = torch.tensor(x, dtype=torch.float32)
+    x = normalize_l2(x.cpu())
+    if isinstance(x, np.ndarray):
+        x = torch.tensor(x, dtype=torch.float32)
     
     return x
 
@@ -292,8 +302,9 @@ def obtain_inverse_attributes(data, percentile=0.15, num_dim=32, combine_with_ro
         L, V = torch.linalg.eigh(Lap)
     
     x = V[:, :num_dim].float()
-    x = preprocessing.normalize(x.cpu(), norm="l2")
-    x = torch.tensor(x, dtype=torch.float32)
+    x = normalize_l2(x.cpu())
+    if isinstance(x, np.ndarray):
+        x = torch.tensor(x, dtype=torch.float32)
     
     return x
 
@@ -367,8 +378,9 @@ def obtain_disassortative_ppr_attributes(data, alpha=0.15, num_dim=32, percentil
         L, V = torch.linalg.eigh(Lap)
     
     x = V[:, :num_dim].float()
-    x = preprocessing.normalize(x.cpu(), norm="l2")
-    x = torch.tensor(x, dtype=torch.float32)
+    x = normalize_l2(x.cpu())
+    if isinstance(x, np.ndarray):
+        x = torch.tensor(x, dtype=torch.float32)
     
     return x
 
