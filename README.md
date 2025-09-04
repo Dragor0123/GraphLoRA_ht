@@ -22,7 +22,7 @@ You can easily run our code by
 
 ```
 # Pre-training
-python main.py --is_pretrain True
+python main.py --is_pretrain True --pretrain_dataset Computers --seed 0
 
 # Fine-tuning
 
@@ -35,3 +35,6 @@ python main.py --pretrain_dataset PubMed --test_dataset CiteSeer --is_transfer T
 # 커스텀 로그 디렉토리 사용
 python main.py --pretrain_dataset PubMed --test_dataset CiteSeer --is_transfer True --seed 42 --use_logging True --log_dir ./experiments/logs
 ```
+
+
+python main.py --method fourier --pretrain_dataset PubMed --test_dataset CiteSeer --is_transfer True --seed 42

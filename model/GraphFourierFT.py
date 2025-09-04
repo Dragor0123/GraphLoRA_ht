@@ -156,7 +156,7 @@ def transfer_fourier(args, config, gpu_id, is_reduction):
     # Load pretrained GNN
     gnn = GNN(pretrain_dataset.x.shape[1], config['output_dim'], act(config['activation']), config['gnn_type'], config['num_layers'])
     model_path = "./pre_trained_gnn/{}.{}.{}.{}.pth".format(args.pretrain_dataset, args.pretext, config['gnn_type'], args.is_reduction)
-    gnn.load_state_dict(torch.load(model_path))
+    gnn.load_state_dict(torch.load(model_path, map_location=device))
     gnn.to(device)
     gnn.eval()
     
